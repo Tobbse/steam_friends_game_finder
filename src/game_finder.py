@@ -65,7 +65,7 @@ class Application(tk.Frame):
         print(steamids)
 
         new_root = tk.Tk()
-        new_root.geometry("345x537")
+        new_root.geometry("360x560")
         Result(new_root, api_key, steamids)
 
 
@@ -139,9 +139,9 @@ class Result(tk.Frame):
     def display_results(self):
         game_names_str = "\n".join(self.common_game_names)
         game_names_scrollbar = tk.Scrollbar(self.master)
-        game_names_display = tk.Text(self.master, height=35, width=45, borderwidth=2, relief="solid")
+        game_names_display = tk.Text(self.master, height=33, width=40, borderwidth=2, relief="solid")
         game_names_scrollbar.config(command=game_names_display.yview)
-        game_names_display.config(yscrollcommand=game_names_scrollbar.set, height=35, width=45)
+        game_names_display.config(yscrollcommand=game_names_scrollbar.set, height=33, width=40)
         game_names_display.insert(tk.END, game_names_str)
         game_names_display.grid(row=0, column=0)
         game_names_scrollbar.grid(row=0, column=1)
