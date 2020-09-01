@@ -5,3 +5,5 @@ You'll need to know your (and your friends) SteamId and create a Steam API key h
 
 To install, use pip:
 `sudo pip3 install -r requirements.txt`
+
+Or, if you're using Windows, use the executeable `game_finder.exe`.
