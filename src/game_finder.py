@@ -1,98 +1,12 @@
-import tkinter as tk
 import steamapi
+from steamapi.errors import AccessException
+from steamapi.user import UserNotFoundError
+import toga
+from toga.style.pack import COLUMN, Pack, ROW, CENTER, MONOSPACE
 
-
-class Application(tk.Frame):
-    def __init__(self, master):
-        super().__init__(master)
-        self.create_widgets(master)
-
-
-    def create_widgets(self, master):
-        tk.Label(master, text=" ").grid(row=0, column=0)
-
-        tk.Label(master, text="Steam API Key:").grid(row=2, column=0)
-        self.api_key = tk.Entry(master, borderwidth=1)
-        self.api_key.grid(row=2, column=1)
-
-        tk.Label(master, text=" ").grid(row=3, column=0)
-        tk.Label(master, text="Add SteamIds to compare\n(Seperate with commas):").grid(row=4, column=0, ipady=30)
-
-        steamids_scrollbar = tk.Scrollbar(master)
-        self.steamids_input = tk.Text(master, height=5, width=30, borderwidth=2, relief="solid")
-        steamids_scrollbar.config(command=self.steamids_input.yview)
-        self.steamids_input.config(yscrollcommand=steamids_scrollbar.set, height=3)
-        self.steamids_input.insert(tk.END, "Add friends here.")
-        self.steamids_input.grid(row=4, column=1)
-        steamids_scrollbar.grid(row=4, column=2)
-
-        tk.Label(master, text=" ").grid(row=5, column=0)
-
-        submit = tk.Button(master)
-        submit["text"] = "Show Common Games"
-        submit["command"] = self.submit
-        submit.grid(row=6, column=1)
-
-        reset = tk.Button(master)
-        reset["text"] = "Reset Data"
-        reset["command"] = self.reset
-        reset.grid(row=6, column=0)
-
-
-    def submit(self):
-        api_key = self.api_key.get()
-        steamids = self.get_steamids(self.steamids_input.get("1.0", tk.END))
-
-        if not self.is_valid_api_key(api_key):
-            print("Invalid API key!")
-            print(api_key)
-            self.reset()
-            return
-
-        if len(steamids) < 2:
-            print("Invalid friends array! At least two valid SteamIds needed.")
-            print(steamids)
-            self.reset()
-            return
-
-        for steamid in steamids:
-            if not self.is_valid_steamid(steamid):
-                print("SteamID " + steamid + " is not a 17 digits number!")
-                self.reset()
-                return
-
-        print("Entered SteamIds:")
-        print(steamids)
-
-        new_root = tk.Tk()
-        new_root.geometry("360x560")
-        Result(new_root, api_key, steamids)
-
-
-    def reset(self):
-        self.api_key.delete(0, tk.END)
-        self.steamids_input.delete(0.0, tk.END) # Yes, this actually can't be an int. I have no idea why.
-
-
-    def get_steamids(self, steamids_str):
-        steamids_str = "".join(steamids_str.split())
-        return steamids_str.split(',')
-
-
-    def is_valid_steamid(self, steamid):
-        return len(steamid) == 17 and steamid.isdigit()
-
-
-    def is_valid_api_key(self, api_key):
-        return len(api_key) == 32
-
-
-
-
-class Result(tk.Frame):
-    def __init__(self, master, api_key, steamids):
-        super().__init__(master)
-        self.master = master
+class Result:
+    def __init__(self, api_key, steamids, error_handler):
+        self.error_handler = error_handler
         self.connect_to_steam(api_key, steamids)
         self.get_common_games()
         self.display_results()
@@ -100,8 +14,16 @@ class Result(tk.Frame):
 
     def connect_to_steam(self, api_key, steamids):
         self.connection = steamapi.core.APIConnection(api_key=api_key, validate_key=True)
-        self.users = [steamapi.user.SteamUser(id) for id in steamids]
+        self.users: list[steamapi.user.SteamUser] = []
 
+        for steam_id in steamids:
+            try:
+                user = steamapi.user.SteamUser(steam_id)
+                self.users.append(user)
+                name = user.name
+                continue
+            except UserNotFoundError:
+                self.error_handler("User not found", "User with id \'" + id + "\' was not found.\n\nYou may have supplied an invalid SteamId. Please make sure you are using the correct decimal 64-bit id.\nWill continue without this id.")
 
     def get_common_games(self):
         all_games = []
@@ -110,16 +32,32 @@ class Result(tk.Frame):
 
         print("\n\n*STEAM USERS*")
 
+        restricted_privacy_users: list[str] = []
+        unrestricted_privacy_users: list[str] = []
+
         for user in self.users:
             user_game_ids = []
-            for game in user.games:
-                appid = game.appid
-                if appid not in all_gameids:
-                    all_games.append(game)
-                    all_gameids.append(appid)
-                user_game_ids.append(game.appid)
-            all_users_gameids.append(user_game_ids)
-            print(user.name + ", level " + str(user.level) + ", owns " + str(len(user_game_ids)) + " games")
+            try:
+                for game in user.games:
+                    appid = game.appid
+                    if appid not in all_gameids:
+                        all_games.append(game)
+                        all_gameids.append(appid)
+                    user_game_ids.append(game.appid)
+                all_users_gameids.append(user_game_ids)
+                print(user.name + ", level " + str(user.level) + ", owns " + str(len(user_game_ids)) + " games")
+                unrestricted_privacy_users.append(user.name)
+            except AccessException:
+                restricted_privacy_users.append(user.name)
+
+        if len(all_users_gameids) == 0:
+            self.error_handler("Not enough players", "Could not find any players with unrestricted privacy settings.")
+            return
+
+        # self.error_handler("Steam API Error", "Restricted privacy settings to view library for user \'" + user.name + "\'")
+
+        if len(restricted_privacy_users) > 0:
+            self.error_handler("Partial success", "Found " + str(len(restricted_privacy_users)) + " players with restricted privacy settings.\nPlayers with private libraries:\n\n" + ", ".join(restricted_privacy_users) + " \n\nPlayers with public libraries:\n" + ", ".join(unrestricted_privacy_users))
 
         common_gameids = all_users_gameids[0]
         for i in range(1, len(all_users_gameids)):
@@ -135,21 +73,8 @@ class Result(tk.Frame):
         for game_name in self.common_game_names:
             print(game_name)
 
-
-    def display_results(self):
-        game_names_str = "\n".join(self.common_game_names)
-        game_names_scrollbar = tk.Scrollbar(self.master)
-        game_names_display = tk.Text(self.master, height=33, width=40, borderwidth=2, relief="solid")
-        game_names_scrollbar.config(command=game_names_display.yview)
-        game_names_display.config(yscrollcommand=game_names_scrollbar.set, height=33, width=40)
-        game_names_display.insert(tk.END, game_names_str)
-        game_names_display.grid(row=0, column=0)
-        game_names_scrollbar.grid(row=0, column=1)
-
-
-    def intersection(self, list_a, list_b): 
+    def intersection(self, list_a, list_b):
         return list(set(list_a) & set(list_b))
-
 
     def get_game_from_list(self, games, appid):
         for game in games:
@@ -157,10 +82,177 @@ class Result(tk.Frame):
                 return game
         return None
 
+    def display_results(self):
+        game_names_str = "\n".join(self.common_game_names)
+
+        data = []
+        for game_name in self.common_game_names:
+            data.append((str(len(data) + 1), game_name))
+
+        table = toga.Table(headings=["Index", "Game"], multiple_select=True, data=data)
+        result_window = toga.Window(title="Common Games", size=(500, 150))
+        result_window.position = (400, 300)
+        result_window.content = table
+        result_window.show()
 
 
+class SteamUserRow(toga.Box):
+    def __init__(self, index):
+        super().__init__(style=Pack(direction=ROW, padding=10))
+        self.index = index
+        self.steam_id: str = None
 
-root = tk.Tk()
-root.geometry("420x270")
-app = Application(master=root)
-app.mainloop()
+        self.add(toga.Label(str(self.index) + ')', style=Pack(font_family=MONOSPACE, font_size=12)))
+
+        self.add(toga.Label("Steam Id:", style=Pack(padding_left=15)))
+        steam_id_input = toga.TextInput(style=Pack(width=300))
+        steam_id_input.on_change = self.on_steam_id_input_change
+        self.add(steam_id_input)
+
+    def on_steam_id_input_change(self, text_input: toga.TextInput):
+        # Need to verify this.
+        self.steam_id = text_input.value
+
+
+class GameFinder(toga.App):
+    def __init__(self):
+        self.content_right = toga.Box(style=Pack(direction=COLUMN, padding=5))
+        self.steam_user_rows: list[SteamUserRow] = []
+        self.steam_api_input: toga.TextInput = None
+        super().__init__("Game Finder", "steam_friends_game_finder")
+
+    def submit(self, button):
+        steam_ids: list[str] = []
+
+        for row in self.steam_user_rows:
+            if row.steam_id is None or row.steam_id is '':
+                continue
+            if not self.is_valid_steam_id(row.steam_id):
+                self.show_error(
+                    "Input Error",
+                    "SteamID \'" + row.steam_id + "\' at row " + str(row.index) + " is not a 17 digits number!"
+                )
+                return
+            steam_ids.append(row.steam_id)
+
+        if len(steam_ids) < 2:
+            self.show_error("Input Error", "You need to enter at least 2 Steam Ids or Steam Profile Urls.")
+            return
+
+        if self.steam_api_input.value is None or self.steam_api_input.value is '':
+            self.show_error(
+                "Input Error",
+                "You need to enter your API key. You can get it here: https://steamcommunity.com/dev/apikey"
+            )
+            return
+
+        if not self.is_valid_api_key(self.steam_api_input.value):
+            self.show_error(
+                "Input Error",
+                "You have entered an invalid API key. The key contains of 32 characters."
+            )
+            return
+
+        print("Submitting!")
+        result = Result(self.steam_api_input.value, steam_ids, self.show_error)
+
+
+    def is_valid_steam_id(self, steam_id: str):
+        return len(steam_id) == 17 and steam_id.isdigit()
+
+    def is_valid_api_key(self, api_key: str):
+        return len(api_key) == 32
+
+    def show_error(self, title: str, message: str):
+        error_window = toga.Window(title=title, size=(500, 150))
+        error_window.position = (400, 300)
+        error_window.content = toga.Box(children=[toga.Label(text=message)])
+        error_window.show()
+
+    def test_command(self, command):
+        print("test_command")
+
+    def configure_toolbar(self):
+        toolbar_actions = toga.Group("toolbar_actions")
+
+        self.main_window.toolbar.add(toga.Command(
+            self.test_command,
+            text="Test Command Action 1",
+            tooltip="Perform test action 1",
+            # icon=,
+            group=toolbar_actions,
+        ))
+        self.main_window.toolbar.add(toga.Command(
+            self.test_command,
+            text="Test Command Action 2",
+            tooltip="Perform test action 2",
+            # icon=,
+            group=toolbar_actions,
+        ))
+
+    def create_content_left(self):
+        container = toga.Box(style=Pack(
+            direction=COLUMN, padding_top=30, padding_left=20, padding_right=20, padding_bottom=30
+        ))
+
+        steam_api_label = toga.Label("Steam API Key")
+        container.add(steam_api_label)
+
+        self.steam_api_input = toga.TextInput(style=Pack(padding_top=5))
+        container.add(self.steam_api_input)
+
+        content_left = toga.ScrollContainer(horizontal=False)
+        content_left.content = container
+        return content_left
+
+    def add_steam_user_row(self, button):
+        row = SteamUserRow(len(self.steam_user_rows) + 1)
+        self.steam_user_rows.append(row)
+        self.content_right.add(row)
+
+    def remove_steam_user_row(self, button):
+        if len(self.steam_user_rows) <= 2:
+            return
+
+        self.content_right.remove(self.steam_user_rows.pop())
+
+
+    def create_content_right(self):
+        add_button = toga.Button("Add", on_press=self.add_steam_user_row, style=Pack(padding=10, width=130))
+        remove_button = toga.Button("Remove", on_press=self.remove_steam_user_row, style=Pack(padding=10, width=130))
+
+        button_container = toga.Box(style=Pack(direction=ROW, padding=5))
+        self.content_right.add(toga.Label("Add either a SteamId or a Steam Profile Url.", style=Pack(padding_left=10, font_size=12, padding_top=15)))
+        button_container.add(add_button)
+        button_container.add(remove_button)
+        self.content_right.add(button_container)
+        self.content_right.add(toga.Divider(style=Pack(padding=5)))
+
+        # Add initial rows
+        self.add_steam_user_row(add_button)
+        self.add_steam_user_row(add_button)
+
+        return self.content_right
+
+    def startup(self):
+        self.main_window = toga.MainWindow(size=(1280, 720))
+        self.configure_toolbar()
+
+        content_top = toga.SplitContainer()
+        content_top.content = [(self.create_content_left(), 1), (self.create_content_right(), 2)]
+
+        content_bottom = toga.Box(style=Pack(direction=COLUMN, padding=10, alignment=CENTER, height=100))
+        content_bottom.add(toga.Button("Submit", on_press=self.submit, style=Pack(width=300)))
+
+        content_base = toga.SplitContainer(direction=toga.SplitContainer.HORIZONTAL)
+        content_base.content = [(content_top, 1), (content_bottom, 2)]
+
+        self.main_window.content = content_base
+        self.main_window.show()
+
+
+def build():
+    return GameFinder()
+
+
+build().main_loop()
