@@ -116,10 +116,29 @@ class SteamUserRow(toga.Box):
 
 class GameFinder(toga.App):
     def __init__(self):
+        super().__init__("Game Finder", "steam_friends_game_finder")
+
+    def startup(self) -> None:
+        self.main_window = toga.MainWindow(size=(1280, 720))
+        self.configure_toolbar()
+
         self.content_right = toga.Box(style=Pack(direction=COLUMN, padding=5))
         self.steam_user_rows: list[SteamUserRow] = []
         self.steam_api_input: toga.TextInput = None
-        super().__init__("Game Finder", "steam_friends_game_finder")
+
+
+
+        content_top = toga.SplitContainer()
+        content_top.content = [(self.create_content_left(), 1), (self.create_content_right(), 2)]
+
+        content_bottom = toga.Box(style=Pack(direction=COLUMN, padding=10, alignment=CENTER, height=100))
+        content_bottom.add(toga.Button("Submit", on_press=self.submit, style=Pack(width=300)))
+
+        content_base = toga.SplitContainer(direction=toga.SplitContainer.HORIZONTAL)
+        content_base.content = [(content_top, 10), (content_bottom, 1)]
+
+        self.main_window.content = content_base
+        self.main_window.show()
 
     def submit(self, button):
         steam_ids: list[str] = []
@@ -216,7 +235,6 @@ class GameFinder(toga.App):
 
         self.content_right.remove(self.steam_user_rows.pop())
 
-
     def create_content_right(self):
         add_button = toga.Button("Add", on_press=self.add_steam_user_row, style=Pack(padding=10, width=130))
         remove_button = toga.Button("Remove", on_press=self.remove_steam_user_row, style=Pack(padding=10, width=130))
@@ -234,25 +252,5 @@ class GameFinder(toga.App):
 
         return self.content_right
 
-    def startup(self):
-        self.main_window = toga.MainWindow(size=(1280, 720))
-        self.configure_toolbar()
 
-        content_top = toga.SplitContainer()
-        content_top.content = [(self.create_content_left(), 1), (self.create_content_right(), 2)]
-
-        content_bottom = toga.Box(style=Pack(direction=COLUMN, padding=10, alignment=CENTER, height=100))
-        content_bottom.add(toga.Button("Submit", on_press=self.submit, style=Pack(width=300)))
-
-        content_base = toga.SplitContainer(direction=toga.SplitContainer.HORIZONTAL)
-        content_base.content = [(content_top, 1), (content_bottom, 2)]
-
-        self.main_window.content = content_base
-        self.main_window.show()
-
-
-def build():
-    return GameFinder()
-
-
-build().main_loop()
+GameFinder().main_loop()
