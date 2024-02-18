@@ -1,3 +1,4 @@
 -e git+https://github.com/smiley/steamapi.git@master#egg=steamapi
 requests>=2.3.0
 toga
+pyperclip

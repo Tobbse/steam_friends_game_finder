@@ -1,29 +1,30 @@
 import steamapi
+import pyperclip
 from steamapi.errors import AccessException
 from steamapi.user import UserNotFoundError
 import toga
 from toga.style.pack import COLUMN, Pack, ROW, CENTER, MONOSPACE
 
 class Result:
-    def __init__(self, api_key, steamids, error_handler):
+    def __init__(self, api_key, steam_ids, error_handler):
         self.error_handler = error_handler
-        self.connect_to_steam(api_key, steamids)
+        self.connect_to_steam(api_key, steam_ids)
         self.get_common_games()
         self.display_results()
 
 
-    def connect_to_steam(self, api_key, steamids):
+    def connect_to_steam(self, api_key, steam_ids):
         self.connection = steamapi.core.APIConnection(api_key=api_key, validate_key=True)
         self.users: list[steamapi.user.SteamUser] = []
 
-        for steam_id in steamids:
+        for steam_id in steam_ids:
             try:
                 user = steamapi.user.SteamUser(steam_id)
                 self.users.append(user)
                 name = user.name
                 continue
             except UserNotFoundError:
-                self.error_handler("User not found", "User with id \'" + id + "\' was not found.\n\nYou may have supplied an invalid SteamId. Please make sure you are using the correct decimal 64-bit id.\nWill continue without this id.")
+                self.error_handler("User not found", "User with id \'" + id + "\' was not found.\n\nYou may have supplied an invalid steam_id. Please make sure you are using the correct decimal 64-bit id.\nWill continue without this id.")
 
     def get_common_games(self):
         all_games = []
@@ -59,11 +60,11 @@ class Result:
         if len(restricted_privacy_users) > 0:
             self.error_handler("Partial success", "Found " + str(len(restricted_privacy_users)) + " players with restricted privacy settings.\nPlayers with private libraries:\n\n" + ", ".join(restricted_privacy_users) + " \n\nPlayers with public libraries:\n" + ", ".join(unrestricted_privacy_users))
 
-        common_gameids = all_users_gameids[0]
+        common_game_ids = all_users_gameids[0]
         for i in range(1, len(all_users_gameids)):
-            common_gameids = self.intersection(common_gameids, all_users_gameids[i])
+            common_game_ids = self.intersection(common_game_ids, all_users_gameids[i])
 
-        common_games = [self.get_game_from_list(all_games, steamid) for steamid in common_gameids]
+        common_games = [self.get_game_from_list(all_games, steam_id) for steam_id in common_game_ids]
         common_games = list(filter(None, common_games))
 
         self.common_game_names = [game.name for game in common_games]
@@ -89,11 +90,23 @@ class Result:
         for game_name in self.common_game_names:
             data.append((str(len(data) + 1), game_name))
 
-        table = toga.Table(headings=["Index", "Game"], multiple_select=True, data=data)
-        result_window = toga.Window(title="Common Games", size=(500, 150))
+        window_content = toga.Box(style=Pack(direction=COLUMN, alignment=CENTER))
+        window_content.add(toga.Table(headings=["Index", "Game"], multiple_select=True, data=data, style=Pack(height=250)))
+        window_content.add(toga.Button("Copy to clipboard", on_press=self.copy_games,
+                                       style=Pack(width=300, padding=10, height=30)))
+
+        result_window = toga.Window(title="Common Games", size=(500, 300))
         result_window.position = (400, 300)
-        result_window.content = table
+        result_window.content = window_content
         result_window.show()
+
+    def copy_games(self, button):
+        names = ""
+
+        for game in self.common_game_names:
+            names += game + "\n"
+
+        pyperclip.copy(names)
 
 
 class SteamUserRow(toga.Box):
@@ -149,7 +162,7 @@ class GameFinder(toga.App):
             if not self.is_valid_steam_id(row.steam_id):
                 self.show_error(
                     "Input Error",
-                    "SteamID \'" + row.steam_id + "\' at row " + str(row.index) + " is not a 17 digits number!"
+                    "steam_id \'" + row.steam_id + "\' at row " + str(row.index) + " is not a 17 digits number!"
                 )
                 return
             steam_ids.append(row.steam_id)
@@ -240,7 +253,7 @@ class GameFinder(toga.App):
         remove_button = toga.Button("Remove", on_press=self.remove_steam_user_row, style=Pack(padding=10, width=130))
 
         button_container = toga.Box(style=Pack(direction=ROW, padding=5))
-        self.content_right.add(toga.Label("Add either a SteamId or a Steam Profile Url.", style=Pack(padding_left=10, font_size=12, padding_top=15)))
+        self.content_right.add(toga.Label("Add either a steam_id or a Steam Profile Url.", style=Pack(padding_left=10, font_size=12, padding_top=15)))
         button_container.add(add_button)
         button_container.add(remove_button)
         self.content_right.add(button_container)
