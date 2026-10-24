@@ -26,7 +26,7 @@ Find common Steam games across your friend group's libraries and wishlists. Buil
 
 2. Run the app:
    ```bash
-   python main.py
+   python steam_friends_game_finder.py
    ```
 
 3. Paste your Steam Web API key in the top-left field, add your friends' Steam profiles, and click Find Common Games. Your API key and saved player list are stored locally in `steam_finder_config.json`.

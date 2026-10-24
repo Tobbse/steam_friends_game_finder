@@ -1,0 +1,81 @@
+name: Build & Release Binaries
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset_name: SteamFriendsGameFinder-Windows.exe
+          - os: macos-latest
+            asset_name: SteamFriendsGameFinder-macOS.zip
+          - os: ubuntu-latest
+            asset_name: SteamFriendsGameFinder-Linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linux system dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller flet httpx
+
+      - name: Build executable with Flet
+        shell: bash
+        run: |
+          flet pack steam_friends_game_finder.py --name SteamFriendsGameFinder --yes
+
+      - name: Prepare Windows artifact
+        if: matrix.os == 'windows-latest'
+        shell: bash
+        run: |
+          mv dist/SteamFriendsGameFinder.exe dist/${{ matrix.asset_name }}
+
+      - name: Prepare macOS artifact
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          cd dist
+          if [ -d "SteamFriendsGameFinder.app" ]; then
+            zip -r ${{ matrix.asset_name }} SteamFriendsGameFinder.app
+          else
+            zip -r ${{ matrix.asset_name }} SteamFriendsGameFinder
+          fi
+
+      - name: Prepare Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          mv dist/SteamFriendsGameFinder dist/${{ matrix.asset_name }}
+
+      - name: Upload binaries to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: false
+          generate_release_notes: true
+          files: dist/${{ matrix.asset_name }}
