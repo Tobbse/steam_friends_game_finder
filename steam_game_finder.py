@@ -6,21 +6,32 @@ import re
 import time
 import webbrowser
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import flet as ft
 import httpx
 
 CONFIG_FILE = Path("steam_finder_config.json")
-MAX_PRICE_SLIDER_CAP = 70  # Values 0..69 represent $0..$69; 70 represents "Unlimited"
+MAX_PRICE_SLIDER_CAP = 70  # Values 0..69 represent $0..$69; 70 represents "∞"
 
-# Dynamic in-memory maps populated once per session from Steam's Web API
+# Dynamic in-memory maps populated from Steam's Web API
 SESSION_CATEGORY_MAP: Dict[int, str] = {}
 SESSION_TAG_MAP: Dict[int, str] = {}
 
+UNRELEASED_KEYWORDS = (
+    "coming soon",
+    "to be announced",
+    "tba",
+    "tbd",
+    "unreleased",
+    "when it's done",
+    "when its done",
+    "wishlist now",
+)
+
 
 # ==========================================
-# FLET CROSS-VERSION COMPATIBILITY HELPERS
+# FLET CROSS-VERSION COMPATIBILITY & EVENT SYNC HELPERS
 # ==========================================
 def open_url(url: str):
     """Opens a URL in the user's default system web browser."""
@@ -28,6 +39,135 @@ def open_url(url: str):
         webbrowser.open(url)
     except Exception:
         pass
+
+
+def sync_event_value(e, control: Optional[ft.Control] = None):
+    """
+    Ensures `control.value` is synchronized with the incoming event payload (`e.control.value` / `e.data`)
+    across Flet versions without needlessly mutating active gesture controls.
+    """
+    if e is None:
+        return
+    target = control or getattr(e, "control", None)
+    if target is None:
+        return
+
+    raw_data = getattr(e, "data", None)
+    ctrl_val = getattr(target, "value", None)
+
+    if isinstance(target, (ft.Checkbox, ft.Switch)):
+        if isinstance(ctrl_val, bool):
+            target.value = ctrl_val
+        elif isinstance(raw_data, bool):
+            target.value = raw_data
+        elif isinstance(raw_data, str) and raw_data.lower() in ("true", "false"):
+            target.value = raw_data.lower() == "true"
+    elif isinstance(target, (ft.Dropdown, ft.TextField)):
+        if ctrl_val is None and isinstance(raw_data, str):
+            target.value = raw_data
+
+
+def bind_change_handlers(
+    control: ft.Control,
+    handler: Optional[Callable],
+    include_submit_and_blur: bool = False,
+):
+    """Binds change/select/submit/blur handlers safely across Flet versions."""
+    if handler is None:
+        return control
+
+    def wrapped_handler(e):
+        sync_event_value(e, control)
+        handler(e)
+
+    for attr in ("on_change", "on_select"):
+        if hasattr(control, attr):
+            try:
+                setattr(control, attr, wrapped_handler)
+            except Exception:
+                pass
+
+    if include_submit_and_blur:
+        for attr in ("on_submit", "on_blur"):
+            if hasattr(control, attr):
+                try:
+                    setattr(control, attr, wrapped_handler)
+                except Exception:
+                    pass
+
+    return control
+
+
+def create_checkbox(
+    label: str,
+    value: bool = False,
+    on_change: Optional[Callable] = None,
+    expand=None,
+    label_size: Optional[int] = None,
+    compact: bool = False,
+) -> ft.Checkbox:
+    """Creates a Checkbox with synchronized event handling and optional compact styling across Flet versions."""
+    kwargs = {"label": label, "value": value}
+    if expand is not None:
+        kwargs["expand"] = expand
+    if label_size is not None and hasattr(ft, "TextStyle"):
+        try:
+            kwargs["label_style"] = ft.TextStyle(size=label_size)
+        except Exception:
+            pass
+    if compact and hasattr(ft, "VisualDensity"):
+        vd_cls = getattr(ft, "VisualDensity", None)
+        if vd_cls and hasattr(vd_cls, "COMPACT"):
+            kwargs["visual_density"] = vd_cls.COMPACT
+
+    try:
+        cb = ft.Checkbox(**kwargs)
+    except TypeError:
+        kwargs.pop("label_style", None)
+        kwargs.pop("visual_density", None)
+        cb = ft.Checkbox(**kwargs)
+    return bind_change_handlers(cb, on_change)
+
+
+def create_switch(
+    label: str,
+    value: bool = False,
+    on_change: Optional[Callable] = None,
+) -> ft.Switch:
+    """Creates a Switch with synchronized event handling across Flet versions."""
+    sw = ft.Switch(label=label, value=value)
+    return bind_change_handlers(sw, on_change)
+
+
+def create_slider(
+    min_val: float,
+    max_val: float,
+    divisions: int,
+    value: float,
+    on_drag_label: Optional[Callable] = None,
+    on_release_commit: Optional[Callable] = None,
+    expand: bool = True,
+) -> ft.Slider:
+    """
+    Creates a Slider that separates live label updates (`on_change`) from heavy list filtering (`on_change_end`).
+    This prevents Flutter/Flet from rebuilding the page or Slider widget mid-drag, which otherwise causes
+    the mouse pointer to stay stuck to the slider thumb after releasing the mouse button.
+    """
+    sl = ft.Slider(
+        min=min_val,
+        max=max_val,
+        divisions=divisions,
+        value=value,
+        expand=expand,
+    )
+    if on_drag_label is not None:
+        sl.on_change = on_drag_label
+    if on_release_commit is not None:
+        if hasattr(sl, "on_change_end"):
+            sl.on_change_end = on_release_commit
+        else:
+            sl.on_change = on_release_commit
+    return sl
 
 
 def get_padding_symmetric(horizontal: int = 0, vertical: int = 0):
@@ -62,6 +202,65 @@ def get_click_cursor():
     return None
 
 
+def get_image_fit_cover():
+    """Returns COVER image fit safely across Flet 0.2x and 1.0+."""
+    for attr in ("BoxFit", "ImageFit"):
+        cls = getattr(ft, attr, None)
+        if cls and hasattr(cls, "COVER"):
+            return cls.COVER
+    return "cover"
+
+
+def get_font_weight_bold():
+    """Returns BOLD font weight safely across Flet versions."""
+    cls = getattr(ft, "FontWeight", None)
+    if cls and hasattr(cls, "BOLD"):
+        return cls.BOLD
+    return "bold"
+
+
+def get_text_align_center():
+    """Returns CENTER text alignment safely across Flet versions."""
+    cls = getattr(ft, "TextAlign", None)
+    if cls and hasattr(cls, "CENTER"):
+        return cls.CENTER
+    return "center"
+
+
+def get_text_overflow_ellipsis():
+    """Returns ELLIPSIS text overflow safely across Flet versions."""
+    cls = getattr(ft, "TextOverflow", None)
+    if cls and hasattr(cls, "ELLIPSIS"):
+        return cls.ELLIPSIS
+    return "ellipsis"
+
+
+def get_main_alignment(name: str):
+    """Resolves MainAxisAlignment safely across Flet versions."""
+    cls = getattr(ft, "MainAxisAlignment", None)
+    if cls:
+        mapping = {
+            "spaceBetween": "SPACE_BETWEEN",
+            "center": "CENTER",
+            "end": "END",
+            "start": "START",
+        }
+        attr = mapping.get(name, name.upper())
+        if hasattr(cls, attr):
+            return getattr(cls, attr)
+    return name
+
+
+def get_cross_alignment(name: str):
+    """Resolves CrossAxisAlignment safely across Flet versions."""
+    cls = getattr(ft, "CrossAxisAlignment", None)
+    if cls:
+        attr = name.upper()
+        if hasattr(cls, attr):
+            return getattr(cls, attr)
+    return name
+
+
 def configure_always_visible_scrollbars(page: ft.Page):
     """Configures page themes so scrollbars are always visible on all scrollable containers."""
     sb_theme_cls = getattr(ft, "ScrollBarTheme", getattr(ft, "ScrollbarTheme", None))
@@ -88,7 +287,7 @@ def get_icon(name: str):
 
 def get_color(name: str):
     """Resolves color enums safely across Flet versions."""
-    if not isinstance(name, str):
+    if not isinstance(name, str) or name.startswith("#"):
         return name
     name_upper = name.upper()
     for attr in ("Colors", "colors"):
@@ -96,6 +295,19 @@ def get_color(name: str):
         if cls and hasattr(cls, name_upper):
             return getattr(cls, name_upper)
     return name.lower()
+
+
+def get_color_with_opacity(opacity: float, color_name: str, fallback_hex: str) -> str:
+    """Returns a color with opacity safely across Flet versions, with an #AARRGGBB hex fallback."""
+    resolved = get_color(color_name)
+    for attr in ("Colors", "colors"):
+        cls = getattr(ft, attr, None)
+        if cls and hasattr(cls, "with_opacity"):
+            try:
+                return cls.with_opacity(opacity, resolved)
+            except Exception:
+                pass
+    return fallback_hex
 
 
 def get_center_alignment():
@@ -107,14 +319,29 @@ def get_center_alignment():
     return None
 
 
-def create_card(content: ft.Control, bgcolor: Optional[str] = None) -> ft.Card:
+def get_border_all(width: float = 1.0, color: str = "#42A5F5"):
+    """Creates a uniform border safely across Flet versions."""
+    for attr in ("Border", "border"):
+        cls = getattr(ft, attr, None)
+        if cls and hasattr(cls, "all"):
+            try:
+                return cls.all(width, get_color(color))
+            except Exception:
+                pass
+    return None
+
+
+def create_card(content: ft.Control, bgcolor: Optional[str] = None, expand: bool = False) -> ft.Card:
     """Creates a Card safely across Flet versions (handling bgcolor vs color differences)."""
+    kwargs = {"content": content}
+    if expand:
+        kwargs["expand"] = True
     if bgcolor is not None:
         try:
-            return ft.Card(content=content, bgcolor=bgcolor)
+            return ft.Card(bgcolor=bgcolor, **kwargs)
         except TypeError:
             pass
-    return ft.Card(content=content)
+    return ft.Card(**kwargs)
 
 
 def create_button(
@@ -200,15 +427,10 @@ def create_option(text: str, key: Optional[str] = None):
 
 
 def create_dropdown(options, value=None, label=None, width=None, on_change=None):
-    """Creates a Dropdown control safely without passing event handlers to __init__."""
+    """Creates a Dropdown control safely across Flet versions."""
     kwargs = {k: v for k, v in (("label", label), ("value", value), ("width", width)) if v is not None}
     dd = ft.Dropdown(options=options, **kwargs)
-    if on_change:
-        if hasattr(dd, "on_change"):
-            dd.on_change = on_change
-        elif hasattr(dd, "on_select"):
-            dd.on_select = on_change
-    return dd
+    return bind_change_handlers(dd, on_change)
 
 
 def create_badge_layout(controls):
@@ -222,19 +444,87 @@ def create_badge_layout(controls):
 
 
 def parse_price_string(price_str: str) -> Optional[float]:
-    """Extracts a numeric float price from a formatted price string as a fallback."""
+    """Extracts a numeric float price from a formatted price string, handling thousands & decimal separators."""
     if not price_str:
         return None
     if "free" in price_str.lower():
         return 0.0
-    cleaned = price_str.replace(",", ".")
-    match = re.search(r"(\d+(?:\.\d+)?)", cleaned)
-    if match:
+    match = re.search(r"(\d[\d.,]*)", price_str)
+    if not match:
+        return None
+    num_str = match.group(1).strip(".,")
+    if "," in num_str and "." in num_str:
+        if num_str.rfind(",") > num_str.rfind("."):
+            num_str = num_str.replace(".", "").replace(",", ".")
+        else:
+            num_str = num_str.replace(",", "")
+    elif "," in num_str:
+        parts = num_str.split(",")
+        if len(parts[-1]) == 2:
+            num_str = "".join(parts[:-1]) + "." + parts[-1]
+        else:
+            num_str = num_str.replace(",", "")
+    try:
+        return float(num_str)
+    except ValueError:
+        return None
+
+
+def is_release_text_unreleased(text: str, current_year: int) -> bool:
+    """Checks if a custom release date string indicates an unreleased / upcoming game."""
+    if not text:
+        return False
+    low = text.strip().lower()
+    if any(kw in low for kw in UNRELEASED_KEYWORDS):
+        return True
+    # Check for quarter notation like "Q1 2026" or "Q4 2025"
+    q_match = re.search(r"\bq[1-4]\s*(\d{4})\b", low)
+    if q_match and int(q_match.group(1)) >= current_year:
+        return True
+    # If the release string is just a future year (e.g. "2026", "2027")
+    if re.fullmatch(r"\d{4}", low) and int(low) > current_year:
+        return True
+    # Check if any 4-digit year in the string is strictly in the future
+    years = [int(y) for y in re.findall(r"\b(20\d{2})\b", low)]
+    if years and min(years) > current_year:
+        return True
+    return False
+
+
+def detect_unreleased_from_store_item(item: dict, now_ts: float, current_year: int) -> Tuple[bool, str]:
+    """
+    Accurately determines `(is_unreleased, release_date_str)` from a Steam `IStoreBrowseService/GetItems`
+    entry, covering all ways Steam represents upcoming / unreleased titles.
+    """
+    rel = item.get("release") or {}
+    rd_ts = int(rel.get("steam_release_date") or 0)
+    custom_msg = str(rel.get("custom_release_date_message") or "").strip()
+
+    coming_soon_flag = any(
+        (
+            bool(item.get("is_coming_soon")),
+            bool(rel.get("is_coming_soon")),
+            bool(rel.get("coming_soon_display")),
+            bool(rel.get("is_preload")),
+            bool(rel.get("is_abridged_release_date")),
+            rd_ts > now_ts,
+            is_release_text_unreleased(custom_msg, current_year),
+        )
+    )
+
+    release_date_str = ""
+    if custom_msg:
+        release_date_str = custom_msg
+    elif rd_ts > 0:
         try:
-            return float(match.group(1))
-        except ValueError:
+            dt = datetime.datetime.fromtimestamp(rd_ts, tz=datetime.timezone.utc)
+            release_date_str = dt.strftime("%b %d, %Y")
+        except Exception:
             pass
-    return None
+    elif coming_soon_flag:
+        release_date_str = "Coming Soon"
+
+    return coming_soon_flag, release_date_str
 
 
 # ==========================================
@@ -248,6 +538,7 @@ class Player:
         self.owned_games: Dict[int, str] = {}     # appid -> game_name
         self.wishlist_games: Dict[int, str] = {}  # appid -> game_name
         self.is_private: bool = False
+        self.fetch_error: Optional[str] = None
         self.library_fetched: bool = False
 
 
@@ -272,12 +563,42 @@ class GameItem:
         self.final_price: Optional[float] = None  # Numeric price in dollars AFTER applied discounts
         self.discount_pct: int = 0
         self.is_on_sale: bool = False
+        self.review_percentage: Optional[int] = None  # 0..100 positive user review percentage
+        self.review_desc: str = ""
         self.price_fetched: bool = False
         self.store_info_fetched: bool = False
+        self.details_fetched: bool = False  # Tracks single-game appdetails fallback completion
+
+    @property
+    def is_effectively_unreleased(self) -> bool:
+        """
+        Authoritative check for whether this game is unreleased.
+        Checks explicit `is_unreleased` flag as well as release_date text and price_str.
+        """
+        if self.is_unreleased:
+            return True
+        current_year = datetime.datetime.now(datetime.timezone.utc).year
+        if self.release_date and is_release_text_unreleased(self.release_date, current_year):
+            return True
+        if self.price_str and is_release_text_unreleased(self.price_str, current_year):
+            return True
+        return False
+
+    @property
+    def is_effectively_unavailable(self) -> bool:
+        """
+        Authoritative check for whether this game is unavailable/delisted.
+        Ensures unreleased games are never misclassified as unavailable.
+        """
+        if self.is_effectively_unreleased:
+            return False
+        return bool(self.is_unavailable)
 
     @property
     def is_free(self) -> bool:
-        """Returns True if the game is Free to Play ($0.00)."""
+        """Returns True if the game is released and Free to Play ($0.00)."""
+        if self.is_effectively_unreleased:
+            return False
         return (self.final_price is not None and self.final_price == 0.0) or ("free" in self.price_str.lower())
 
     @property
@@ -292,6 +613,18 @@ class GameItem:
         all_labels = self.categories | self.genres
         return any(
             "multiplayer" in c.lower() or "multi-player" in c.lower() or "pvp" in c.lower()
+            for c in all_labels
+        )
+
+    @property
+    def is_vr(self) -> bool:
+        """Checks dynamically resolved categories & tags for VR support."""
+        all_labels = self.categories | self.genres
+        return any(
+            c.lower() == "vr"
+            or "vr " in c.lower()
+            or " vr" in c.lower()
+            or "virtual reality" in c.lower()
             for c in all_labels
         )
 
@@ -318,8 +651,8 @@ class SteamClient:
 
     async def ensure_store_definitions(self):
         """
-        Dynamically fetches Steam's official Category ID and Tag ID definitions
-        once per session so no hardcoded tag strings are needed.
+        Dynamically fetches Steam's official Category ID and Tag ID definitions.
+        Automatically retries on subsequent calls if either map failed to populate.
         """
         if not self.api_key:
             return
@@ -363,39 +696,54 @@ class SteamClient:
     async def resolve_steam_id(self, input_str: str) -> Optional[str]:
         input_str = input_str.strip()
 
-        # 1. 17-digit SteamID64
-        match_id64 = re.search(r"\b(\d{17})\b", input_str)
-        if match_id64:
-            return match_id64.group(1)
+        # 1. Explicit /profiles/<17-digit SteamID64> URL
+        match_profile_url = re.search(r"steamcommunity\.com/profiles/(\d{17})", input_str)
+        if match_profile_url:
+            return match_profile_url.group(1)
 
-        # 2. Extract custom vanity name or profile path
+        # 2. Explicit /id/<vanity> URL (checked before generic 17-digit regex in case vanity is 17 digits)
         match_vanity = re.search(r"steamcommunity\.com/id/([^/?#]+)", input_str)
-        vanity_name = match_vanity.group(1) if match_vanity else input_str.rstrip("/")
+        if match_vanity:
+            vanity_name = match_vanity.group(1)
+        else:
+            # 3. Raw 17-digit SteamID64
+            match_id64 = re.search(r"\b(\d{17})\b", input_str)
+            if match_id64:
+                return match_id64.group(1)
+            vanity_name = input_str.rstrip("/")
 
         url = "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/"
         params = {"key": self.api_key, "vanityurl": vanity_name}
         try:
             async with self._api_semaphore:
                 resp = await self.client.get(url, params=params)
-            data = resp.json()
-            if data.get("response", {}).get("success") == 1:
-                return data["response"]["steamid"]
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("response", {}).get("success") == 1:
+                    return data["response"]["steamid"]
         except Exception:
             pass
         return None
 
-    async def fetch_player_summary(self, player: Player):
+    async def fetch_player_summary(self, player: Player) -> Tuple[bool, Optional[str]]:
+        """Fetches player summary and returns (found_profile, error_message)."""
         url = "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
         params = {"key": self.api_key, "steamids": player.steam_id}
         try:
             async with self._api_semaphore:
                 resp = await self.client.get(url, params=params)
+            if resp.status_code in (401, 403):
+                return False, "Invalid Steam Web API Key (HTTP 403/401). Please check your API key."
+            if resp.status_code != 200:
+                return False, f"Steam API returned HTTP {resp.status_code}."
             players = resp.json().get("response", {}).get("players", [])
             if players:
                 player.display_name = players[0].get("personaname", player.steam_id)
                 player.avatar_url = players[0].get("avatarmedium", "")
-        except Exception:
-            pass
+                return True, None
+            return False, None
+        except Exception as exc:
+            return False, f"Network error while contacting Steam: {exc}"
 
     async def fetch_owned_games(self, player: Player):
         url = "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
@@ -409,7 +757,10 @@ class SteamClient:
             async with self._api_semaphore:
                 resp = await self.client.get(url, params=params)
             if resp.status_code in (401, 403):
-                player.is_private = True
+                player.fetch_error = "Invalid Steam Web API Key or unauthorized access (HTTP 403/401)."
+                return
+            if resp.status_code != 200:
+                player.fetch_error = f"Steam API returned HTTP {resp.status_code}."
                 return
             data = resp.json().get("response", {})
             # Steam returns an empty dict {} when 'Game details' are set to Private
@@ -418,8 +769,8 @@ class SteamClient:
                 return
             for g in data.get("games", []):
                 player.owned_games[g["appid"]] = g.get("name", f"App {g['appid']}")
-        except Exception:
-            player.is_private = True
+        except Exception as exc:
+            player.fetch_error = f"Network error: {exc}"
 
     async def fetch_wishlist(self, player: Player):
         # Method 1: Official Steam Web API (IWishlistService)
@@ -432,16 +783,16 @@ class SteamClient:
                 if resp.status_code == 200:
                     data = resp.json().get("response", {})
                     items = data.get("items", [])
-                    if items:
-                        for item in items:
-                            appid = item.get("appid")
-                            if appid:
-                                player.wishlist_games[int(appid)] = f"App {appid}"
-                        return
+                    for item in items:
+                        appid = item.get("appid")
+                        if appid:
+                            player.wishlist_games[int(appid)] = f"App {appid}"
+                    # Authoritative response from official API (even if wishlist is empty)
+                    return
             except Exception:
                 pass
 
-        # Method 2: Fallback to Steam Store wishlistdata endpoint if Web API returned empty
+        # Method 2: Fallback to Steam Store wishlistdata endpoint only if Web API failed
         headers = {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -474,7 +825,7 @@ class SteamClient:
         on_progress: Optional[Callable[[int, int], None]] = None,
     ):
         """
-        Fetches prices, discounts, titles, platforms, descriptions, release/availability status,
+        Fetches prices, discounts, reviews, titles, platforms, descriptions, release/availability status,
         categories, and tags in 150-game chunks using paced waves.
         """
         if not games:
@@ -487,6 +838,7 @@ class SteamClient:
         chunk_size = 150
         chunks = [games[i : i + chunk_size] for i in range(0, total, chunk_size)]
         now_ts = time.time()
+        current_year = datetime.datetime.now(datetime.timezone.utc).year
 
         async def process_chunk(chunk: List[GameItem]):
             nonlocal completed
@@ -504,6 +856,7 @@ class SteamClient:
                         "include_best_purchase_option": True,
                         "include_release": True,
                         "include_platforms": True,
+                        "include_reviews": True,
                         "include_tag_count": 20,
                     },
                 }
@@ -524,6 +877,16 @@ class SteamClient:
 
                             if item.get("name"):
                                 g.name = item["name"]
+
+                            # Extract Header Image Asset URL (supports newer hashed asset paths)
+                            assets = item.get("assets") or {}
+                            asset_fmt = assets.get("asset_url_format")
+                            header_file = assets.get("header")
+                            if asset_fmt and header_file:
+                                rel_path = asset_fmt.replace("${FILENAME}", header_file).lstrip("/")
+                                g.header_image_url = (
+                                    f"https://shared.akamai.steamstatic.com/store_item_assets/{rel_path}"
+                                )
 
                             # Dynamically resolve Store Categories
                             cats_obj = item.get("categories") or {}
@@ -554,27 +917,26 @@ class SteamClient:
                             if basic.get("developers") and not g.developers:
                                 g.developers = [d.get("name", "") for d in basic["developers"] if d.get("name")]
 
+                            # Extract User Reviews
+                            reviews_obj = item.get("reviews") or {}
+                            summary_filtered = (
+                                reviews_obj.get("summary_filtered")
+                                or reviews_obj.get("summary_unfiltered")
+                                or {}
+                            )
+                            pct_pos = summary_filtered.get("percent_positive")
+                            review_cnt = int(summary_filtered.get("review_count") or 0)
+                            if pct_pos is not None and review_cnt > 0:
+                                g.review_percentage = int(pct_pos)
+                                g.review_desc = str(summary_filtered.get("review_score_label") or "")
+
                             # Extract Release Status & Unreleased Detection
-                            rel = item.get("release") or {}
-                            rd_ts = int(rel.get("steam_release_date") or 0)
-                            coming_soon = bool(
-                                item.get("is_coming_soon") is True
-                                or rel.get("is_coming_soon") is True
-                                or (rd_ts > now_ts)
+                            coming_soon, rel_date_str = detect_unreleased_from_store_item(
+                                item, now_ts, current_year
                             )
                             g.is_unreleased = coming_soon
-
-                            if not g.release_date:
-                                if rel.get("custom_release_date_message"):
-                                    g.release_date = str(rel["custom_release_date_message"])
-                                elif rd_ts > 0:
-                                    try:
-                                        dt = datetime.datetime.fromtimestamp(rd_ts, tz=datetime.timezone.utc)
-                                        g.release_date = dt.strftime("%b %d, %Y")
-                                    except Exception:
-                                        pass
-                                elif coming_soon:
-                                    g.release_date = "Coming Soon"
+                            if rel_date_str and not g.release_date:
+                                g.release_date = rel_date_str
 
                             # Extract Platforms
                             platforms = item.get("platforms") or {}
@@ -588,42 +950,75 @@ class SteamClient:
                             # Extract Pricing & Discounts (after applied discount)
                             bpo = item.get("best_purchase_option")
                             if bpo:
-                                g.price_str = bpo.get("formatted_final_price", "")
-                                g.discount_pct = int(bpo.get("discount_pct", 0) or 0)
-                                g.is_on_sale = g.discount_pct > 0
+                                formatted_price = str(bpo.get("formatted_final_price") or "").strip()
                                 cents = bpo.get("final_price_in_cents")
+                                parsed_price: Optional[float] = None
                                 if cents is not None:
                                     try:
-                                        g.final_price = int(cents) / 100.0
+                                        parsed_price = int(cents) / 100.0
                                     except Exception:
-                                        g.final_price = parse_price_string(g.price_str)
+                                        parsed_price = parse_price_string(formatted_price)
                                 else:
-                                    g.final_price = parse_price_string(g.price_str)
-                                g.price_fetched = True
-                            elif item.get("is_free") and not g.is_unreleased:
+                                    parsed_price = parse_price_string(formatted_price)
+
+                                # Guard against unreleased games having a $0 placeholder purchase option
+                                if g.is_effectively_unreleased and (parsed_price is None or parsed_price == 0.0):
+                                    g.price_str = ""
+                                    g.final_price = None
+                                    g.discount_pct = 0
+                                    g.is_on_sale = False
+                                    g.price_fetched = False
+                                else:
+                                    g.price_str = formatted_price
+                                    g.final_price = parsed_price
+                                    g.discount_pct = int(bpo.get("discount_pct", 0) or 0)
+                                    g.is_on_sale = g.discount_pct > 0
+                                    g.price_fetched = parsed_price is not None or bool(formatted_price)
+                            elif (item.get("is_free") or item.get("is_free_temporarily")) and not g.is_effectively_unreleased:
                                 g.price_str = "Free to Play"
                                 g.final_price = 0.0
                                 g.discount_pct = 0
                                 g.is_on_sale = False
                                 g.price_fetched = True
 
+                            # Secondary check: if a game is visible on the store, has no release date timestamp,
+                            # no price, no reviews, and is only wishlisted (0 owners), it is an upcoming/unreleased title
+                            rel_obj = item.get("release") or {}
+                            if (
+                                not g.is_unreleased
+                                and not g.price_fetched
+                                and item.get("visible") is not False
+                                and not item.get("unlisted")
+                                and int(rel_obj.get("steam_release_date") or 0) == 0
+                                and review_cnt == 0
+                                and len(g.owners) == 0
+                            ):
+                                g.is_unreleased = True
+                                if not g.release_date:
+                                    g.release_date = "Coming Soon"
+
                             # Detect Unavailable / Delisted store status
                             is_delisted = (
                                 item.get("visible") is False
                                 or item.get("unlisted") is True
                                 or (item.get("success") not in (1, None))
-                                or (not g.is_unreleased and not g.price_fetched)
+                                or (not g.is_effectively_unreleased and not g.price_fetched)
                             )
-                            g.is_unavailable = bool(is_delisted and not g.is_unreleased)
+                            g.is_unavailable = bool(is_delisted and not g.is_effectively_unreleased)
                             g.store_info_fetched = True
 
                         # Any requested appid completely omitted by Steam's store response is unavailable/removed
                         for g in chunk:
                             if g.appid not in returned_appids:
-                                g.is_unavailable = True
+                                g.is_unavailable = not g.is_effectively_unreleased
                                 g.store_info_fetched = True
                 except Exception:
                     pass
+                finally:
+                    # Ensure no game in the chunk remains stuck displaying "Fetching..." forever
+                    for g in chunk:
+                        if not g.store_info_fetched:
+                            g.store_info_fetched = True
 
             completed += len(chunk)
             if on_progress:
@@ -638,16 +1033,18 @@ class SteamClient:
                 await asyncio.sleep(0.15)
 
     async def fetch_store_info(self, game: GameItem):
-        """On-demand single-game fallback (used when opening Game Details popup for an unfetched item)."""
-        if game.store_info_fetched and game.short_description:
+        """On-demand single-game fallback (used when opening Game Details popup for an item missing details)."""
+        if game.details_fetched or (game.store_info_fetched and game.short_description):
             return
 
+        current_year = datetime.datetime.now(datetime.timezone.utc).year
         async with self._store_semaphore:
             url = f"https://store.steampowered.com/api/appdetails?appids={game.appid}&cc=us"
             try:
                 resp = await self.client.get(url)
                 if resp.status_code != 200:
                     return
+                game.details_fetched = True
                 data = resp.json().get(str(game.appid), {})
                 if data.get("success"):
                     game_data = data.get("data", {})
@@ -661,9 +1058,12 @@ class SteamClient:
                     game.developers = game_data.get("developers", [])
                     rel_info = game_data.get("release_date") or {}
                     if rel_info.get("date"):
-                        game.release_date = rel_info["date"]
-                    if rel_info.get("coming_soon") is True:
+                        game.release_date = str(rel_info["date"]).strip()
+                    if rel_info.get("coming_soon") is True or is_release_text_unreleased(
+                        game.release_date, current_year
+                    ):
                         game.is_unreleased = True
+                        game.is_unavailable = False
 
                     game.categories.update(
                         c["description"] for c in game_data.get("categories", []) if c.get("description")
@@ -673,17 +1073,17 @@ class SteamClient:
                     )
 
                     platforms = game_data.get("platforms", {})
-                    game.mac_supported = platforms.get("mac", False)
-                    game.windows_supported = platforms.get("windows", False)
-                    game.linux_supported = platforms.get("linux", False)
+                    game.mac_supported = bool(platforms.get("mac", False))
+                    game.windows_supported = bool(platforms.get("windows", False))
+                    game.linux_supported = bool(platforms.get("linux", False))
 
                     if game_data.get("header_image"):
                         game.header_image_url = game_data["header_image"]
 
                     price_overview = game_data.get("price_overview")
                     if price_overview:
-                        game.discount_pct = price_overview.get("discount_percent", 0)
-                        game.price_str = price_overview.get("final_formatted", "")
+                        game.discount_pct = int(price_overview.get("discount_percent", 0) or 0)
+                        game.price_str = str(price_overview.get("final_formatted") or "").strip()
                         game.is_on_sale = game.discount_pct > 0
                         if price_overview.get("final") is not None:
                             try:
@@ -693,17 +1093,15 @@ class SteamClient:
                         else:
                             game.final_price = parse_price_string(game.price_str)
                         game.price_fetched = True
-                    elif game_data.get("is_free") and not game.is_unreleased:
+                    elif game_data.get("is_free") and not game.is_effectively_unreleased:
                         game.price_str = "Free to Play"
                         game.final_price = 0.0
                         game.price_fetched = True
 
-                    if not game.is_unreleased and not game.price_fetched:
-                        game.is_unavailable = True
-
+                    game.is_unavailable = bool(not game.is_effectively_unreleased and not game.price_fetched)
                     game.store_info_fetched = True
                 else:
-                    game.is_unavailable = True
+                    game.is_unavailable = not game.is_effectively_unreleased
                     game.store_info_fetched = True
             except Exception:
                 pass
@@ -713,28 +1111,84 @@ class SteamClient:
 # MAIN FLET GUI APPLICATION
 # ==========================================
 async def main(page: ft.Page):
-    page.title = "Steam Squad Game Finder"
+    page.title = "Steam Friends Game Finder"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = 20
     configure_always_visible_scrollbars(page)
 
+    # Default window dimensions: 1330 x 960
     try:
-        page.window.width = 1180
-        page.window.height = 880
+        page.window.width = 1330
+        page.window.height = 960
     except Exception:
         try:
-            page.window_width = 1180
-            page.window_height = 880
+            page.window_width = 1330
+            page.window_height = 960
         except Exception:
             pass
 
-    # Background task & state flags
-    status_clear_task: Optional[asyncio.Task] = None
+    # State flags
     is_fetching: bool = False
+    loading_title_str: str = "Fetching game data..."
     has_loaded_once: bool = False
+    notify_clear_task: Optional[asyncio.Task] = None
 
-    # Reusable SnackBar to prevent overlay memory leaks
-    shared_snackbar = ft.SnackBar(ft.Text(""))
+    # Top-anchored, non-fullscreen notification popup
+    top_toast_text = ft.Text("", color=get_color("white"), weight=get_font_weight_bold(), size=13)
+    top_toast_card = ft.Container(
+        bgcolor="#1565C0",
+        border=get_border_all(1, "#42A5F5"),
+        border_radius=8,
+        padding=get_padding_symmetric(horizontal=18, vertical=10),
+        content=ft.Row(
+            tight=True,
+            spacing=8,
+            controls=[
+                ft.Icon(get_icon("info_outline"), color=get_color("cyan200"), size=18),
+                top_toast_text,
+            ],
+        ),
+    )
+    top_toast_wrapper = ft.Container(
+        visible=False,
+        top=10,
+        left=0,
+        right=0,
+        content=ft.Row(
+            alignment=get_main_alignment("center"),
+            controls=[top_toast_card],
+        ),
+    )
+    if hasattr(page, "overlay"):
+        try:
+            page.overlay.append(top_toast_wrapper)
+        except Exception:
+            pass
+
+    def notify(msg: str):
+        """Displays a slightly blue popup banner at the very top of the window."""
+        nonlocal notify_clear_task
+        if notify_clear_task and not notify_clear_task.done():
+            notify_clear_task.cancel()
+
+        top_toast_text.value = msg
+        top_toast_wrapper.visible = True
+        if hasattr(page, "overlay") and top_toast_wrapper not in page.overlay:
+            try:
+                page.overlay.append(top_toast_wrapper)
+            except Exception:
+                pass
+        page.update()
+
+        async def _hide_toast():
+            try:
+                await asyncio.sleep(3.5)
+                top_toast_wrapper.visible = False
+                page.update()
+            except asyncio.CancelledError:
+                pass
+
+        notify_clear_task = asyncio.create_task(_hide_toast())
 
     # Safe multi-tier dialog display helpers (Flet 1.0 + Flet 0.2x compatible)
     def open_dialog(dlg: ft.AlertDialog):
@@ -789,48 +1243,21 @@ async def main(page: ft.Page):
         except Exception:
             pass
 
-    def notify(msg: str):
-        shared_snackbar.content = ft.Text(msg)
-        if hasattr(page, "show_dialog"):
-            try:
-                page.show_dialog(shared_snackbar)
-                return
-            except Exception:
-                pass
-        if hasattr(page, "open"):
-            try:
-                page.open(shared_snackbar)
-                return
-            except Exception:
-                pass
-        if hasattr(page, "overlay"):
-            try:
-                if shared_snackbar not in page.overlay:
-                    page.overlay.append(shared_snackbar)
-                shared_snackbar.open = True
-                page.update()
-                return
-            except Exception:
-                pass
-        page.snack_bar = shared_snackbar
-        page.snack_bar.open = True
-        page.update()
-
     def show_dialog(title: str, message: str):
         dlg = ft.AlertDialog(
-            title=ft.Text(title, weight="bold"),
+            title=ft.Text(title, weight=get_font_weight_bold()),
             content=ft.Text(message),
             actions=[create_button("OK", on_click=lambda _: close_dialog(dlg))],
-            actions_alignment="end",
+            actions_alignment=get_main_alignment("end"),
         )
         open_dialog(dlg)
 
     def format_game_price_label(game: GameItem) -> str:
         if game.price_str:
             return game.price_str
-        if game.is_unreleased:
+        if game.is_effectively_unreleased:
             return "Unreleased / TBA"
-        if game.is_unavailable:
+        if game.is_effectively_unavailable:
             return "Unavailable / Delisted from Steam Store"
         if not game.store_info_fetched:
             return "Fetching..."
@@ -841,12 +1268,19 @@ async def main(page: ft.Page):
         if game.windows_supported:
             platforms.append("Windows")
         if game.mac_supported:
-            platforms.append("macOS")
+            platforms.append("MacOS")
         if game.linux_supported:
             platforms.append("Linux")
         if platforms:
             return ", ".join(platforms)
         return "Fetching..." if not game.store_info_fetched else "N/A"
+
+    def format_game_reviews(game: GameItem) -> str:
+        if game.review_percentage is not None:
+            if game.review_desc:
+                return f"{game.review_percentage}% ({game.review_desc})"
+            return f"{game.review_percentage}%"
+        return "No user reviews" if game.store_info_fetched else "Fetching..."
 
     # Modal Popup Dialog for Game Details
     def open_game_details_dialog(game: GameItem):
@@ -854,42 +1288,49 @@ async def main(page: ft.Page):
             owner_names = ", ".join(p.display_name for p in game.owners) or "None"
             wishlist_names = ", ".join(p.display_name for p in game.wishlisters) or "None"
 
+            needs_fallback_fetch = (not game.store_info_fetched or not game.short_description) and not game.details_fetched
+
             desc_text = ft.Text(
                 game.short_description
-                or ("Fetching store description..." if not game.store_info_fetched else "No description available."),
+                or ("Fetching store description..." if needs_fallback_fetch else "No description available."),
                 size=12,
             )
 
             price_text = ft.Text(
                 f"Price: {format_game_price_label(game)}",
                 size=14,
-                weight="bold",
+                weight=get_font_weight_bold(),
                 color=(
                     get_color("green400")
                     if game.is_on_sale
-                    else (get_color("red300") if game.is_unavailable else get_color("white"))
+                    else (get_color("red300") if game.is_effectively_unavailable else get_color("white"))
                 ),
+            )
+            review_text = ft.Text(
+                f"• User Reviews: {format_game_reviews(game)}",
+                size=12,
+                color=get_color("blue300") if game.review_percentage is not None else None,
             )
             dev_str = (
                 ", ".join(game.developers)
                 if game.developers
-                else ("Fetching..." if not game.store_info_fetched else "N/A")
+                else ("Fetching..." if needs_fallback_fetch else "N/A")
             )
             dev_text = ft.Text(f"• Developer: {dev_str}", size=12)
 
             rel_suffix = (
                 " (Unreleased)"
-                if game.is_unreleased
-                else (" (Unavailable in Store)" if game.is_unavailable else "")
+                if game.is_effectively_unreleased
+                else (" (Unavailable in Store)" if game.is_effectively_unavailable else "")
             )
-            rel_base = game.release_date or ("Fetching..." if not game.store_info_fetched else "N/A")
+            rel_base = game.release_date or ("Fetching..." if needs_fallback_fetch else "N/A")
             release_text = ft.Text(
                 f"• Release Date: {rel_base}{rel_suffix}",
                 size=12,
                 color=(
                     get_color("amber300")
-                    if game.is_unreleased
-                    else (get_color("red300") if game.is_unavailable else None)
+                    if game.is_effectively_unreleased
+                    else (get_color("red300") if game.is_effectively_unavailable else None)
                 ),
             )
 
@@ -898,12 +1339,12 @@ async def main(page: ft.Page):
             all_tags_str = (
                 ", ".join(sorted(game.categories | game.genres)[:12])
                 if (game.categories or game.genres)
-                else ("Fetching..." if not game.store_info_fetched else "None listed")
+                else ("Fetching..." if needs_fallback_fetch else "None listed")
             )
             tags_text = ft.Text(f"• Tags & Categories: {all_tags_str}", size=12)
 
             dlg = ft.AlertDialog(
-                title=ft.Text(game.name, weight="bold", size=18),
+                title=ft.Text(game.name, weight=get_font_weight_bold(), size=18),
                 content=ft.Container(
                     width=480,
                     content=ft.Column(
@@ -912,7 +1353,7 @@ async def main(page: ft.Page):
                                 src=game.header_image_url,
                                 width=460,
                                 height=215,
-                                fit="cover",
+                                fit=get_image_fit_cover(),
                                 border_radius=6,
                                 error_content=ft.Icon(
                                     get_icon("videogame_asset"), size=50, color=get_color("grey500")
@@ -920,11 +1361,12 @@ async def main(page: ft.Page):
                             ),
                             price_text,
                             ft.Divider(),
-                            ft.Text("Short Description:", weight="bold", size=13),
+                            ft.Text("Short Description:", weight=get_font_weight_bold(), size=13),
                             desc_text,
                             ft.Divider(),
                             ft.Text(f"• Owners ({len(game.owners)}): {owner_names}", size=12),
                             ft.Text(f"• Wishlisted ({len(game.wishlisters)}): {wishlist_names}", size=12),
+                            review_text,
                             dev_text,
                             release_text,
                             platform_text,
@@ -943,12 +1385,12 @@ async def main(page: ft.Page):
                     ),
                     create_button("Close", on_click=lambda _: close_dialog(dlg)),
                 ],
-                actions_alignment="end",
+                actions_alignment=get_main_alignment("end"),
             )
 
             open_dialog(dlg)
 
-            if (not game.store_info_fetched or not game.short_description) and api_key_field.value.strip():
+            if needs_fallback_fetch:
                 async def fetch_background():
                     try:
                         async with SteamClient(api_key_field.value.strip()) as client:
@@ -958,14 +1400,17 @@ async def main(page: ft.Page):
                         price_text.value = f"Price: {format_game_price_label(game)}"
                         if game.is_on_sale:
                             price_text.color = get_color("green400")
-                        elif game.is_unavailable:
+                        elif game.is_effectively_unavailable:
                             price_text.color = get_color("red300")
+                        else:
+                            price_text.color = get_color("white")
 
+                        review_text.value = f"• User Reviews: {format_game_reviews(game)}"
                         dev_text.value = f"• Developer: {', '.join(game.developers) if game.developers else 'N/A'}"
                         r_suffix = (
                             " (Unreleased)"
-                            if game.is_unreleased
-                            else (" (Unavailable in Store)" if game.is_unavailable else "")
+                            if game.is_effectively_unreleased
+                            else (" (Unavailable in Store)" if game.is_effectively_unavailable else "")
                         )
                         release_text.value = f"• Release Date: {(game.release_date or 'N/A')}{r_suffix}"
                         platform_text.value = f"• Platforms: {format_game_platforms(game)}"
@@ -976,7 +1421,9 @@ async def main(page: ft.Page):
                             else "None listed"
                         )
                         tags_text.value = f"• Tags & Categories: {t_list}"
-                        page.update()
+
+                        # Always re-evaluate filters in case fallback metadata updated release/availability/tags/price
+                        filter_and_render_games(recompute_filters=True)
                     except Exception as err_bg:
                         print(f"Background fetch error: {err_bg}")
 
@@ -1006,7 +1453,10 @@ async def main(page: ft.Page):
 
     def save_config():
         sort_config_players()
-        CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        try:
+            CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        except OSError as err:
+            print(f"Warning: Could not save config file: {err}")
 
     # App State & In-Memory Session Caches
     players: List[Player] = []
@@ -1033,7 +1483,7 @@ async def main(page: ft.Page):
 
     api_key_header_row = ft.Row(
         controls=[
-            ft.Text("Steam Web API Key", size=18, weight="bold"),
+            ft.Text("Steam Web API Key", size=18, weight=get_font_weight_bold()),
             api_key_warning_icon,
         ],
         spacing=6,
@@ -1078,7 +1528,7 @@ async def main(page: ft.Page):
 
     add_player_header_row = ft.Row(
         controls=[
-            ft.Text("Add New Player", size=16, weight="bold"),
+            ft.Text("Add New Player", size=16, weight=get_font_weight_bold()),
             add_player_info_icon,
         ],
         spacing=6,
@@ -1089,13 +1539,14 @@ async def main(page: ft.Page):
         expand=True,
     )
 
-    player_list_view = ft.ListView(height=280, spacing=5)
+    # Expandable player list so it stretches down to the bottom button
+    player_list_view = ft.ListView(expand=True, spacing=5)
     try:
         player_list_view.scroll = get_always_scroll()
     except Exception:
         pass
 
-    # Main Submit Button
+    # Main Submit Button (anchored at the bottom of the left panel)
     submit_btn = create_button(
         "Find Common Games",
         icon="search",
@@ -1116,7 +1567,7 @@ async def main(page: ft.Page):
             }
             is_outdated = (last_fetched_player_ids != selected_ids)
 
-        label = "Refresh Games (Outdated)" if is_outdated else "Find Common Games"
+        label = "Refresh Games" if is_outdated else "Find Common Games"
         icon_val = get_icon("refresh" if is_outdated else "search")
         click_cursor = get_click_cursor()
         style_kwargs = {
@@ -1138,122 +1589,155 @@ async def main(page: ft.Page):
         submit_btn.icon = icon_val
         submit_btn.style = btn_style
 
-    # Status, Progress Bar & Centered Loading Spinner Controls
-    status_text = ft.Text("", size=14, color=get_color("cyan200"), visible=False)
-    fetch_progress_bar = ft.ProgressBar(
-        value=0,
-        visible=False,
-        color=get_color("cyan400"),
-        bgcolor=get_color("bluegrey800"),
-    )
+    # Centered Loading View Controls (Subtitle + ProgressBar)
     center_loading_subtitle = ft.Text(
         "Connecting to Steam Web API...",
         size=14,
         color=get_color("cyan200"),
-        text_align="center",
+        text_align=get_text_align_center(),
+    )
+    center_progress_bar = ft.ProgressBar(
+        width=360,
+        value=None,
+        color=get_color("cyan400"),
+        bgcolor=get_color("bluegrey800"),
     )
 
-    def set_progress_state(
-        visible: bool,
-        message: Optional[str] = None,
-        progress: Optional[float] = None,
-        auto_clear_seconds: Optional[float] = None,
-    ):
-        """Updates the status message and progress bar safely, with optional auto-clear timer."""
-        nonlocal status_clear_task
-        if status_clear_task and not status_clear_task.done():
-            status_clear_task.cancel()
-
-        if message is not None:
-            status_text.value = message
-            if is_fetching and message:
-                center_loading_subtitle.value = message
-        status_text.visible = bool(status_text.value)
-        fetch_progress_bar.visible = visible
-        fetch_progress_bar.value = progress
+    def update_loading_progress(message: str, progress: Optional[float] = None):
+        """Updates the text and progress bar inside the centered loading spinner view."""
+        center_loading_subtitle.value = message
+        center_progress_bar.value = progress
         page.update()
-
-        if auto_clear_seconds and status_text.value:
-            expected_msg = status_text.value
-
-            async def _clear_after_delay():
-                try:
-                    await asyncio.sleep(auto_clear_seconds)
-                    if status_text.value == expected_msg and not fetch_progress_bar.visible:
-                        status_text.value = ""
-                        status_text.visible = False
-                        page.update()
-                except asyncio.CancelledError:
-                    pass
-
-            status_clear_task = asyncio.create_task(_clear_after_delay())
 
     # ------------------------------------------
     # TOP FILTER & SORT CONTROLS
     # ------------------------------------------
-    min_owned_label = ft.Text("Min Owned: 1", size=12, width=110)
-    min_owned_slider = ft.Slider(
-        min=0,
-        max=5,
-        divisions=5,
-        value=1,
-        label="Owned: {value}",
-        width=170,
-    )
+    min_owned_label = ft.Text("Min Owned: 1", size=12, width=102)
+    min_wishlist_label = ft.Text("Min Wishlist: 0", size=12, width=102)
+    discount_label = ft.Text("Min Discount: 0%", size=12, width=102)
+    max_price_label = ft.Text("Max Price: ∞", size=12, width=102)
+    min_review_label = ft.Text("Min Review: 0%", size=12, width=102)
 
-    min_wishlist_label = ft.Text("Min Wishlist: 0", size=12, width=110)
-    min_wishlist_slider = ft.Slider(
-        min=0,
-        max=5,
-        divisions=5,
-        value=0,
-        label="Wishlist: {value}",
-        width=170,
-    )
-
-    discount_label = ft.Text("Min Discount: 0%", size=12, width=110)
-    discount_slider = ft.Slider(
-        min=0,
-        max=90,
-        divisions=18,
-        value=0,
-        label="{value}%",
-        width=170,
-    )
-
-    max_price_label = ft.Text("Max Price: Unlimited", size=12, width=130)
-    max_price_slider = ft.Slider(
-        min=0,
-        max=MAX_PRICE_SLIDER_CAP,
-        divisions=MAX_PRICE_SLIDER_CAP,
-        value=MAX_PRICE_SLIDER_CAP,
-        label="Unlimited",
-        width=170,
-    )
-
-    def sync_slider_labels():
+    def sync_slider_labels(update_only_labels: bool = False):
+        """
+        Updates the Text labels next to the sliders.
+        Never mutates the Slider controls themselves so active mouse drags are never interrupted.
+        """
         min_owned_label.value = f"Min Owned: {int(round(min_owned_slider.value or 0))}"
         min_wishlist_label.value = f"Min Wishlist: {int(round(min_wishlist_slider.value or 0))}"
         discount_label.value = f"Min Discount: {int(round(discount_slider.value or 0))}%"
+        min_review_label.value = f"Min Review: {int(round(min_review_slider.value or 0))}%"
 
         price_val = int(
             round(max_price_slider.value if max_price_slider.value is not None else MAX_PRICE_SLIDER_CAP)
         )
         if price_val >= MAX_PRICE_SLIDER_CAP:
-            max_price_label.value = "Max Price: Unlimited"
-            max_price_slider.label = "Unlimited"
+            max_price_label.value = "Max Price: ∞"
         elif price_val == 0:
-            max_price_label.value = "Max Price: $0 (Free)"
-            max_price_slider.label = "$0 (Free)"
+            max_price_label.value = "Max Price: $0"
         else:
             max_price_label.value = f"Max Price: ${price_val}"
-            max_price_slider.label = f"${price_val}"
 
-    def update_match_sliders():
-        """Updates owned and wishlist slider max values to equal the count of checked players."""
+        if update_only_labels:
+            for lbl in (
+                min_owned_label,
+                min_wishlist_label,
+                discount_label,
+                max_price_label,
+                min_review_label,
+            ):
+                try:
+                    lbl.update()
+                except Exception:
+                    pass
+
+    def on_slider_drag(e=None):
+        """Lightweight handler during slider dragging: updates only the text label next to the slider."""
+        sync_slider_labels(update_only_labels=True)
+
+    def on_owned_slider_release(e=None):
+        """Commits Min Owned slider change when the mouse button is released."""
+        nonlocal current_page
+        if int(round(min_owned_slider.value or 0)) == 0 and int(round(min_wishlist_slider.value or 0)) == 0:
+            min_wishlist_slider.value = 1
+        sync_slider_labels(update_only_labels=False)
+        current_page = 1
+        filter_and_render_games(recompute_filters=True)
+
+    def on_wishlist_slider_release(e=None):
+        """Commits Min Wishlist slider change when the mouse button is released."""
+        nonlocal current_page
+        if int(round(min_wishlist_slider.value or 0)) == 0 and int(round(min_owned_slider.value or 0)) == 0:
+            min_owned_slider.value = 1
+        sync_slider_labels(update_only_labels=False)
+        current_page = 1
+        filter_and_render_games(recompute_filters=True)
+
+    def on_filter_change(e=None):
+        """Commits filter changes and re-renders the filtered games list."""
+        nonlocal current_page
+        sync_slider_labels(update_only_labels=False)
+        current_page = 1
+        filter_and_render_games(recompute_filters=True)
+
+    min_owned_slider = create_slider(
+        min_val=0,
+        max_val=5,
+        divisions=5,
+        value=1,
+        on_drag_label=on_slider_drag,
+        on_release_commit=on_owned_slider_release,
+    )
+
+    min_wishlist_slider = create_slider(
+        min_val=0,
+        max_val=5,
+        divisions=5,
+        value=0,
+        on_drag_label=on_slider_drag,
+        on_release_commit=on_wishlist_slider_release,
+    )
+
+    discount_slider = create_slider(
+        min_val=0,
+        max_val=90,
+        divisions=18,
+        value=0,
+        on_drag_label=on_slider_drag,
+        on_release_commit=on_filter_change,
+    )
+
+    max_price_slider = create_slider(
+        min_val=0,
+        max_val=MAX_PRICE_SLIDER_CAP,
+        divisions=MAX_PRICE_SLIDER_CAP,
+        value=MAX_PRICE_SLIDER_CAP,
+        on_drag_label=on_slider_drag,
+        on_release_commit=on_filter_change,
+    )
+
+    min_review_slider = create_slider(
+        min_val=0,
+        max_val=100,
+        divisions=20,
+        value=0,
+        on_drag_label=on_slider_drag,
+        on_release_commit=on_filter_change,
+    )
+
+    def update_match_sliders() -> bool:
+        """
+        Updates owned and wishlist slider max values.
+        Uses loaded player count when results are already loaded, or ticked player count otherwise.
+        Returns True if any slider value was clamped/changed.
+        """
         ticked_count = sum(1 for p in config.get("players", []) if p.get("enabled", True))
-        max_players = max(1, ticked_count)
-        is_disabled = ticked_count == 0
+        reference_count = len(players) if (has_loaded_once and players) else ticked_count
+        max_players = max(1, reference_count)
+        is_disabled = reference_count == 0
+
+        prev_owned = int(round(min_owned_slider.value or 0))
+        prev_wish = int(round(min_wishlist_slider.value or 0))
 
         for slider in (min_owned_slider, min_wishlist_slider):
             slider.min = 0
@@ -1269,46 +1753,27 @@ async def main(page: ft.Page):
         if int(round(min_owned_slider.value or 0)) == 0 and int(round(min_wishlist_slider.value or 0)) == 0:
             min_owned_slider.value = 1
 
-        sync_slider_labels()
+        sync_slider_labels(update_only_labels=False)
+        new_owned = int(round(min_owned_slider.value or 0))
+        new_wish = int(round(min_wishlist_slider.value or 0))
+        return (prev_owned != new_owned) or (prev_wish != new_wish)
 
-    def on_owned_slider_change(e):
-        nonlocal current_page
-        if int(round(min_owned_slider.value or 0)) == 0 and int(round(min_wishlist_slider.value or 0)) == 0:
-            min_wishlist_slider.value = 1
-        sync_slider_labels()
-        current_page = 1
-        filter_and_render_games()
-
-    def on_wishlist_slider_change(e):
-        nonlocal current_page
-        if int(round(min_wishlist_slider.value or 0)) == 0 and int(round(min_owned_slider.value or 0)) == 0:
-            min_owned_slider.value = 1
-        sync_slider_labels()
-        current_page = 1
-        filter_and_render_games()
-
-    def on_filter_change(e=None):
-        nonlocal current_page
-        sync_slider_labels()
-        current_page = 1
-        filter_and_render_games()
-
-    min_owned_slider.on_change = on_owned_slider_change
-    min_wishlist_slider.on_change = on_wishlist_slider_change
-    discount_slider.on_change = on_filter_change
-    max_price_slider.on_change = on_filter_change
-
-    def render_player_list():
+    def render_player_list() -> bool:
+        """Renders the left-hand player list and returns True if slider bounds caused value clamping."""
         sort_config_players()
         player_list_view.controls.clear()
 
-        for idx, p_data in enumerate(config.get("players", []), start=1):
+        all_players = config.get("players", [])
+        selected_players = [p for p in all_players if p.get("enabled", True)]
+        available_players = [p for p in all_players if not p.get("enabled", True)]
+
+        def build_player_row(p_data: dict, idx: int, is_enabled: bool) -> ft.Container:
             def make_toggle(p):
                 def toggle_handler(e):
-                    p["enabled"] = e.control.value
+                    p["enabled"] = bool(e.control.value)
                     save_config()
                     render_player_list()
-                    filter_and_render_games(recompute_filters=False)
+                    filter_and_render_games(recompute_filters=True)
                 return toggle_handler
 
             def make_delete(p):
@@ -1317,16 +1782,15 @@ async def main(page: ft.Page):
                     session_players_cache.pop(p.get("steam_id", ""), None)
                     save_config()
                     render_player_list()
-                    filter_and_render_games(recompute_filters=False)
+                    filter_and_render_games(recompute_filters=True)
                     notify(f"Removed '{p['display_name']}' from player list.")
                 return delete_handler
 
-            is_enabled = p_data.get("enabled", True)
             player_num_badge = ft.Container(
                 content=ft.Text(
                     f"#{idx}",
                     size=11,
-                    weight="bold",
+                    weight=get_font_weight_bold(),
                     color=get_color("cyan200") if is_enabled else get_color("grey500"),
                 ),
                 bgcolor=get_color("bluegrey900"),
@@ -1334,12 +1798,12 @@ async def main(page: ft.Page):
                 border_radius=4,
             )
 
-            cb = ft.Checkbox(
+            cb = create_checkbox(
                 label=p_data["display_name"],
                 value=is_enabled,
+                on_change=make_toggle(p_data),
                 expand=True,
             )
-            cb.on_change = make_toggle(p_data)
 
             del_btn = create_icon_button(
                 "delete",
@@ -1348,23 +1812,69 @@ async def main(page: ft.Page):
                 on_click=make_delete(p_data),
             )
 
-            row_container = ft.Container(
+            return ft.Container(
                 padding=get_padding_only(right=14),
                 content=ft.Row(
                     [
                         ft.Row([player_num_badge, cb], spacing=6, expand=True),
                         del_btn,
                     ],
-                    alignment="spaceBetween",
+                    alignment=get_main_alignment("spaceBetween"),
                 ),
             )
-            player_list_view.controls.append(row_container)
 
-        update_match_sliders()
+        # Selected Players Section
+        player_list_view.controls.append(
+            ft.Text(
+                f"Selected Players ({len(selected_players)})",
+                size=14,
+                weight=get_font_weight_bold(),
+                color=get_color("cyan200"),
+            )
+        )
+        if selected_players:
+            for idx, p_data in enumerate(selected_players, start=1):
+                player_list_view.controls.append(build_player_row(p_data, idx, True))
+        else:
+            player_list_view.controls.append(
+                ft.Container(
+                    padding=get_padding_symmetric(horizontal=4, vertical=4),
+                    content=ft.Text("No players selected.", size=12, italic=True, color=get_color("grey500")),
+                )
+            )
+
+        player_list_view.controls.append(ft.Divider(height=12))
+
+        # Available Players Section
+        player_list_view.controls.append(
+            ft.Text(
+                f"Available Players ({len(available_players)})",
+                size=14,
+                weight=get_font_weight_bold(),
+                color=get_color("grey400"),
+            )
+        )
+        if available_players:
+            for idx, p_data in enumerate(available_players, start=1):
+                player_list_view.controls.append(build_player_row(p_data, idx, False))
+        else:
+            player_list_view.controls.append(
+                ft.Container(
+                    padding=get_padding_symmetric(horizontal=4, vertical=4),
+                    content=ft.Text("No unselected players.", size=12, italic=True, color=get_color("grey500")),
+                )
+            )
+
+        sliders_changed = update_match_sliders()
         check_outdated_state()
         page.update()
+        return sliders_changed
 
     async def on_add_player(e):
+        nonlocal is_fetching, loading_title_str
+        if is_fetching:
+            return
+
         api_key = api_key_field.value.strip()
         if not api_key:
             show_dialog("API Key Required", "Please enter your Steam Web API Key before adding players.")
@@ -1377,44 +1887,54 @@ async def main(page: ft.Page):
         config["api_key"] = api_key
         save_config()
 
-        set_progress_state(True, "Resolving Steam user profile...", None)
-
-        async with SteamClient(api_key) as client:
-            resolved_id = await client.resolve_steam_id(val)
-
-            if not resolved_id:
-                set_progress_state(False, "")
-                show_dialog(
-                    "Player Not Found",
-                    f"Could not find a Steam profile for:\n'{val}'\n\nPlease verify the SteamID64 or URL.",
-                )
-                return
-
-            if any(p["steam_id"] == resolved_id for p in config.get("players", [])):
-                set_progress_state(False, "")
-                show_dialog("Duplicate Player", "This player is already in your player list.")
-                return
-
-            temp_player = Player(steam_id=resolved_id)
-            await client.fetch_player_summary(temp_player)
-
-        new_entry = {
-            "steam_id": resolved_id,
-            "display_name": temp_player.display_name,
-            "enabled": True,
-        }
-        config.setdefault("players", []).append(new_entry)
-        save_config()
-
-        new_player_input.value = ""
-        set_progress_state(
-            False,
-            f"Added player '{temp_player.display_name}'!",
-            auto_clear_seconds=4.0,
-        )
-        notify(f"Added player '{temp_player.display_name}'!")
-        render_player_list()
+        is_fetching = True
+        loading_title_str = "Resolving Steam Profile..."
+        update_loading_progress(f"Looking up '{val}' on Steam...", None)
         filter_and_render_games(recompute_filters=False)
+
+        try:
+            async with SteamClient(api_key) as client:
+                resolved_id = await client.resolve_steam_id(val)
+
+                if not resolved_id:
+                    show_dialog(
+                        "Player Not Found",
+                        f"Could not find a Steam profile for:\n'{val}'\n\nPlease verify the SteamID64, URL, or API Key.",
+                    )
+                    return
+
+                if any(p["steam_id"] == resolved_id for p in config.get("players", [])):
+                    show_dialog("Duplicate Player", "This player is already in your player list.")
+                    return
+
+                update_loading_progress("Fetching player profile details...", None)
+                temp_player = Player(steam_id=resolved_id)
+                found_profile, err_msg = await client.fetch_player_summary(temp_player)
+                if err_msg:
+                    show_dialog("Steam API Error", err_msg)
+                    return
+                if not found_profile:
+                    show_dialog(
+                        "Player Not Found",
+                        f"No Steam account exists for SteamID64:\n'{resolved_id}'",
+                    )
+                    return
+
+            new_entry = {
+                "steam_id": resolved_id,
+                "display_name": temp_player.display_name,
+                "enabled": True,
+            }
+            config.setdefault("players", []).append(new_entry)
+            save_config()
+
+            new_player_input.value = ""
+            notify(f"Added player '{temp_player.display_name}'!")
+        finally:
+            is_fetching = False
+            loading_title_str = "Fetching game data..."
+            render_player_list()
+            filter_and_render_games(recompute_filters=True)
 
     new_player_input.on_submit = on_add_player
 
@@ -1427,61 +1947,86 @@ async def main(page: ft.Page):
         options=[
             create_option("Owned"),
             create_option("Wishlisted"),
+            create_option("User Reviews"),
             create_option("Price"),
             create_option("Discount"),
         ],
-        width=155,
+        width=165,
         on_change=on_filter_change,
     )
 
-    list_mode_switch = ft.Switch(
+    list_mode_switch = create_switch(
         label="List Mode",
         value=False,
+        on_change=lambda _: filter_and_render_games(recompute_filters=True),
     )
-    list_mode_switch.on_change = lambda _: filter_and_render_games(recompute_filters=False)
 
-    show_unreleased_switch = ft.Switch(
-        label="Show Unreleased",
+    # Special Game Switches (Show logic: Unreleased ON by default, Unavailable OFF by default)
+    show_unreleased_switch = create_switch(
+        label="Unreleased",
         value=True,
+        on_change=on_filter_change,
     )
-    show_unreleased_switch.on_change = on_filter_change
 
-    show_unavailable_switch = ft.Switch(
-        label="Show Unavailable",
+    show_unavailable_switch = create_switch(
+        label="Unavailable",
         value=False,
+        on_change=on_filter_change,
     )
-    show_unavailable_switch.on_change = on_filter_change
 
-    search_filter = ft.TextField(
-        label="Search title...",
-        prefix_icon=get_icon("search"),
-        expand=True,
+    search_filter = bind_change_handlers(
+        ft.TextField(
+            label="Search title...",
+            prefix_icon=get_icon("search"),
+            expand=1,
+        ),
+        on_filter_change,
+        include_submit_and_blur=True,
     )
-    search_filter.on_change = on_filter_change
 
-    custom_tags_filter = ft.TextField(
-        hint_text="Filter by tags - enter multiple, comma-separated (e.g. RPG, Survival, Roguelike)",
-        prefix_icon=get_icon("sell"),
-        expand=True,
+    custom_tags_filter = bind_change_handlers(
+        ft.TextField(
+            label="Search tags (comma-separated)...",
+            hint_text="e.g. RPG, Survival, Roguelike",
+            prefix_icon=get_icon("sell"),
+            expand=1,
+        ),
+        on_filter_change,
+        include_submit_and_blur=True,
     )
-    custom_tags_filter.on_change = on_filter_change
 
-    coop_only_cb = ft.Checkbox(label="Co-op")
-    coop_only_cb.on_change = on_filter_change
+    # Compact single-column Common Tags checkboxes with smaller text (size=12)
+    coop_only_cb = create_checkbox(
+        label="Co-op", value=False, on_change=on_filter_change, label_size=12, compact=True
+    )
+    multiplayer_only_cb = create_checkbox(
+        label="Multiplayer", value=False, on_change=on_filter_change, label_size=12, compact=True
+    )
+    vr_only_cb = create_checkbox(
+        label="VR", value=False, on_change=on_filter_change, label_size=12, compact=True
+    )
+    macos_only_cb = create_checkbox(
+        label="MacOS", value=False, on_change=on_filter_change, label_size=12, compact=True
+    )
 
-    multiplayer_only_cb = ft.Checkbox(label="Multiplayer")
-    multiplayer_only_cb.on_change = on_filter_change
-
-    macos_only_cb = ft.Checkbox(label="macOS")
-    macos_only_cb.on_change = on_filter_change
-
-    games_list_view = ft.ListView(expand=True, spacing=6)
+    # Keep BOTH games_list_view and games_state_container permanently mounted inside games_container
+    # and toggle their `.visible` property so Flet never detaches/re-attaches the ListView mid-update.
+    games_list_view = ft.ListView(expand=True, spacing=6, visible=False)
     try:
         games_list_view.scroll = get_always_scroll()
     except Exception:
         pass
 
-    games_container = ft.Container(content=games_list_view, expand=True)
+    games_state_container = ft.Container(expand=True, visible=True)
+
+    games_container = ft.Column(
+        expand=True,
+        spacing=0,
+        controls=[
+            games_state_container,
+            games_list_view,
+        ],
+    )
 
     def build_centered_state(
         icon_name: str,
@@ -1490,6 +2035,7 @@ async def main(page: ft.Page):
         subtitle: str = "",
         show_spinner: bool = False,
         subtitle_control: Optional[ft.Control] = None,
+        extra_control: Optional[ft.Control] = None,
     ) -> ft.Container:
         """Creates a polished, vertically and horizontally centered placeholder state for the games panel."""
         top_visual = (
@@ -1508,9 +2054,9 @@ async def main(page: ft.Page):
             ft.Text(
                 title,
                 size=22,
-                weight="bold",
+                weight=get_font_weight_bold(),
                 color=get_color("white"),
-                text_align="center",
+                text_align=get_text_align_center(),
             ),
         ]
 
@@ -1522,26 +2068,40 @@ async def main(page: ft.Page):
                     subtitle,
                     size=14,
                     color=get_color("grey400"),
-                    text_align="center",
+                    text_align=get_text_align_center(),
                 )
             )
+
+        if extra_control is not None:
+            col_controls.append(extra_control)
 
         return ft.Container(
             expand=True,
             alignment=get_center_alignment(),
             padding=30,
             content=ft.Column(
-                alignment="center",
-                horizontal_alignment="center",
+                alignment=get_main_alignment("center"),
+                horizontal_alignment=get_cross_alignment("center"),
                 tight=True,
                 spacing=14,
                 controls=col_controls,
             ),
         )
 
+    def show_games_placeholder(placeholder_control: ft.Control):
+        """Displays the centered state container and hides the ListView without unmounting it."""
+        games_list_view.visible = False
+        games_state_container.content = placeholder_control
+        games_state_container.visible = True
+
+    def show_games_list():
+        """Displays the ListView and hides the centered state container without unmounting it."""
+        games_state_container.visible = False
+        games_list_view.visible = True
+
     # Helper to compute filtered GameItems
     def compute_filtered_games() -> List[GameItem]:
-        search_query = search_filter.value.lower().strip() if search_filter.value else ""
+        search_query = (search_filter.value or "").lower().strip()
         raw_tags_query = custom_tags_filter.value or ""
         required_tags = [t.strip().lower() for t in raw_tags_query.split(",") if t.strip()]
 
@@ -1549,22 +2109,27 @@ async def main(page: ft.Page):
         min_owned = int(round(min_owned_slider.value or 0))
         min_wishlist = int(round(min_wishlist_slider.value or 0))
         min_discount = int(round(discount_slider.value or 0))
+        min_review = int(round(min_review_slider.value or 0))
         max_price_val = int(
             round(max_price_slider.value if max_price_slider.value is not None else MAX_PRICE_SLIDER_CAP)
         )
         is_price_limited = max_price_val < MAX_PRICE_SLIDER_CAP
         include_unreleased = bool(show_unreleased_switch.value)
         include_unavailable = bool(show_unavailable_switch.value)
+        require_coop = bool(coop_only_cb.value)
+        require_multiplayer = bool(multiplayer_only_cb.value)
+        require_vr = bool(vr_only_cb.value)
+        require_macos = bool(macos_only_cb.value)
 
         filtered: List[GameItem] = []
         for g in all_games_map.values():
             if search_query and search_query not in g.name.lower():
                 continue
 
-            # Unreleased & Unavailable Store Filters
-            if not include_unreleased and g.is_unreleased:
+            # Unreleased & Unavailable Store Filters (Show logic)
+            if not include_unreleased and g.is_effectively_unreleased:
                 continue
-            if not include_unavailable and g.is_unavailable:
+            if not include_unavailable and g.is_effectively_unavailable:
                 continue
 
             # Owned & Wishlist Count Threshold Filters
@@ -1574,17 +2139,24 @@ async def main(page: ft.Page):
                 continue
 
             # Category & Platform Filters
-            if coop_only_cb.value and not g.is_coop:
+            if require_coop and not g.is_coop:
                 continue
-            if multiplayer_only_cb.value and not g.is_multiplayer:
+            if require_multiplayer and not g.is_multiplayer:
                 continue
-            if macos_only_cb.value and g.mac_supported is not True:
+            if require_vr and not g.is_vr:
+                continue
+            if require_macos and g.mac_supported is not True:
                 continue
 
             # Custom Comma-Separated Tags Filter
             if required_tags:
                 game_tags_lower = [lbl.lower() for lbl in (g.categories | g.genres)]
                 if not all(any(req_t in gt for gt in game_tags_lower) for req_t in required_tags):
+                    continue
+
+            # User Review Percentage Filter
+            if min_review > 0:
+                if g.review_percentage is None or g.review_percentage < min_review:
                     continue
 
             # Discount Filter (applies to all games when min_discount > 0)
@@ -1601,6 +2173,16 @@ async def main(page: ft.Page):
 
         if sort_by == "Wishlisted":
             filtered.sort(key=lambda g: (-len(g.wishlisters), -len(g.owners), g.name.lower()))
+        elif sort_by == "User Reviews":
+            filtered.sort(
+                key=lambda g: (
+                    g.review_percentage is None,
+                    -(g.review_percentage if g.review_percentage is not None else -1),
+                    -len(g.owners),
+                    -len(g.wishlisters),
+                    g.name.lower(),
+                )
+            )
         elif sort_by == "Price":
             filtered.sort(
                 key=lambda g: (
@@ -1630,7 +2212,7 @@ async def main(page: ft.Page):
     # CORE LOGIC: DELTA FETCH & AGGREGATE GAMES
     # ------------------------------------------
     async def on_submit(e):
-        nonlocal current_page, is_fetching, has_loaded_once, last_fetched_player_ids
+        nonlocal current_page, is_fetching, loading_title_str, has_loaded_once, last_fetched_player_ids
         if is_fetching:
             return
 
@@ -1654,10 +2236,10 @@ async def main(page: ft.Page):
             return
 
         is_fetching = True
+        loading_title_str = "Fetching game data..."
         submit_btn.disabled = True
-        update_match_sliders()
         current_page = 1
-        center_loading_subtitle.value = "Preparing to fetch libraries & store metadata..."
+        update_loading_progress("Preparing to fetch libraries & store metadata...", None)
         filter_and_render_games(recompute_filters=False)
 
         try:
@@ -1668,7 +2250,7 @@ async def main(page: ft.Page):
             for p_data in active_players_data:
                 sid = p_data["steam_id"]
                 cached_p = session_players_cache.get(sid)
-                if cached_p and cached_p.library_fetched and not cached_p.is_private:
+                if cached_p and cached_p.library_fetched and not cached_p.is_private and not cached_p.fetch_error:
                     players.append(cached_p)
                 else:
                     new_p = Player(steam_id=sid, display_name=p_data["display_name"])
@@ -1679,8 +2261,7 @@ async def main(page: ft.Page):
 
             async with SteamClient(api_key) as client:
                 if players_to_fetch:
-                    set_progress_state(
-                        True,
+                    update_loading_progress(
                         f"Fetching libraries & wishlists for {len(players_to_fetch)} player(s)...",
                         None,
                     )
@@ -1696,9 +2277,10 @@ async def main(page: ft.Page):
                     config_updated = False
                     config_map = {p["steam_id"]: p for p in config.get("players", [])}
                     for p in players_to_fetch:
-                        p.library_fetched = True
-                        if not p.is_private:
-                            session_players_cache[p.steam_id] = p
+                        if not p.fetch_error:
+                            p.library_fetched = True
+                            if not p.is_private:
+                                session_players_cache[p.steam_id] = p
                         if p.steam_id in config_map and p.display_name != config_map[p.steam_id].get("display_name"):
                             config_map[p.steam_id]["display_name"] = p.display_name
                             config_updated = True
@@ -1706,9 +2288,21 @@ async def main(page: ft.Page):
                     if config_updated:
                         save_config()
 
-                    # Alert for private libraries among newly fetched players
-                    private_players = [p.display_name for p in players_to_fetch if p.is_private]
-                    if private_players:
+                    # Check for API / Network errors vs Private libraries
+                    errored_players = [
+                        f"{p.display_name}: {p.fetch_error}" for p in players_to_fetch if p.fetch_error
+                    ]
+                    private_players = [
+                        p.display_name for p in players_to_fetch if p.is_private and not p.fetch_error
+                    ]
+
+                    if errored_players:
+                        show_dialog(
+                            "Steam API / Network Error",
+                            "Failed to fetch library data for the following players:\n\n• "
+                            + "\n• ".join(errored_players),
+                        )
+                    elif private_players:
                         show_dialog(
                             "Private Libraries Detected",
                             "The following players have private libraries or restricted privacy settings:\n\n• "
@@ -1744,23 +2338,25 @@ async def main(page: ft.Page):
                         if p not in game_obj.wishlisters:
                             game_obj.wishlisters.append(p)
 
-                # Only fetch store metadata for games not yet fetched in this session
+                # Fetch store metadata for games not yet fetched in this session
                 unfetched_games = sorted(
-                    [g for g in all_games_map.values() if not g.store_info_fetched],
+                    [
+                        g
+                        for g in all_games_map.values()
+                        if not g.store_info_fetched
+                    ],
                     key=lambda g: (-len(g.owners), -len(g.wishlisters), g.name.lower()),
                 )
 
                 if unfetched_games:
-                    set_progress_state(
-                        True,
-                        f"Fetching store prices, tags & deals for {len(unfetched_games)} games (0/{len(unfetched_games)})...",
+                    update_loading_progress(
+                        f"Fetching store prices, reviews & tags for {len(unfetched_games)} games (0/{len(unfetched_games)})...",
                         0.0,
                     )
 
                     def on_bulk_progress(done: int, total: int):
-                        set_progress_state(
-                            True,
-                            f"Fetching store prices, tags & deals ({done}/{total})...",
+                        update_loading_progress(
+                            f"Fetching store prices, reviews & tags ({done}/{total})...",
                             done / total if total > 0 else 1.0,
                         )
 
@@ -1768,24 +2364,21 @@ async def main(page: ft.Page):
 
             has_loaded_once = True
             last_fetched_player_ids = {p.steam_id for p in players}
-            set_progress_state(
-                False,
-                f"Loaded {len(all_games_map)} unique games with live store prices & tags!",
-                1.0,
-                auto_clear_seconds=4.0,
-            )
+            notify(f"Data loaded! Found {len(all_games_map)} unique games across players.")
         finally:
             is_fetching = False
             submit_btn.disabled = False
             render_player_list()
-            filter_and_render_games()
+            filter_and_render_games(recompute_filters=True)
 
     submit_btn.on_click = on_submit
 
     # ------------------------------------------
-    # TOP SUMMARY + TOGGLES + SORT BAR & BOTTOM PAGINATION BAR
+    # TOP SUMMARY + PROMINENT LEFT-ANCHORED COLLAPSE BUTTON + LIST MODE + SORT BAR
     # ------------------------------------------
-    matching_filters_text = ft.Text("Matching Filters: 0 / 0", size=12, weight="bold", color=get_color("white"))
+    matching_filters_text = ft.Text(
+        "Matching Filters: 0 / 0", size=12, weight=get_font_weight_bold(), color=get_color("white")
+    )
     matching_filters_badge = ft.Container(
         content=matching_filters_text,
         bgcolor=get_color("blue800"),
@@ -1793,25 +2386,70 @@ async def main(page: ft.Page):
         border_radius=6,
     )
 
+    # Prominent Collapse/Expand button positioned at the very left of the summary row
+    filters_collapsed = False
+    collapse_filter_icon = ft.Icon(get_icon("tune"), size=16, color=get_color("white"))
+    collapse_arrow_icon = ft.Icon(get_icon("keyboard_arrow_up"), size=18, color=get_color("white"))
+    collapse_btn_text = ft.Text(
+        "Hide Filters", size=12, weight=get_font_weight_bold(), color=get_color("white")
+    )
+
+    def toggle_filters_collapse(e=None):
+        nonlocal filters_collapsed
+        filters_collapsed = not filters_collapsed
+        top_filters_area.visible = not filters_collapsed
+        if filters_collapsed:
+            collapse_btn_text.value = "Show Filters"
+            collapse_arrow_icon.name = get_icon("keyboard_arrow_down")
+            collapse_filters_chip.bgcolor = "#EF6C00"  # Prominent Amber-Orange when collapsed
+            collapse_filters_chip.border = get_border_all(1.5, "#FFA726")
+        else:
+            collapse_btn_text.value = "Hide Filters"
+            collapse_arrow_icon.name = get_icon("keyboard_arrow_up")
+            collapse_filters_chip.bgcolor = "#00838F"  # Prominent Cyan-Teal when expanded
+            collapse_filters_chip.border = get_border_all(1.5, "#26C6DA")
+        page.update()
+
+    collapse_filters_chip = ft.Container(
+        bgcolor="#00838F",
+        border=get_border_all(1.5, "#26C6DA"),
+        border_radius=6,
+        padding=get_padding_symmetric(horizontal=12, vertical=6),
+        tooltip="Collapse or expand the Filters, Common Tags, Parameters, and Special Games sections",
+        on_click=toggle_filters_collapse,
+        content=ft.Row(
+            tight=True,
+            spacing=6,
+            controls=[collapse_filter_icon, collapse_btn_text, collapse_arrow_icon],
+        ),
+    )
+    if get_click_cursor() is not None:
+        try:
+            collapse_filters_chip.mouse_cursor = get_click_cursor()
+        except Exception:
+            pass
+
     top_summary_bar = ft.Container(
         padding=get_padding_symmetric(horizontal=4, vertical=2),
         content=ft.Row(
-            alignment="spaceBetween",
+            alignment=get_main_alignment("spaceBetween"),
             controls=[
-                matching_filters_badge,
                 ft.Row(
                     [
-                        show_unreleased_switch,
-                        show_unavailable_switch,
+                        collapse_filters_chip,
+                        matching_filters_badge,
+                        list_mode_switch,
                     ],
-                    spacing=10,
+                    spacing=12,
                 ),
                 sort_dropdown,
             ],
         ),
     )
 
-    page_info_text = ft.Text("Showing 0-0 (Page 0 of 0)", size=12, weight="bold", color=get_color("grey300"))
+    page_info_text = ft.Text(
+        "Showing 0-0 (Page 0 of 0)", size=12, weight=get_font_weight_bold(), color=get_color("grey300")
+    )
     prev_page_btn = create_button("< Prev", disabled=True)
     next_page_btn = create_button("Next >", disabled=True)
 
@@ -1831,9 +2469,9 @@ async def main(page: ft.Page):
     def on_page_size_change(e):
         nonlocal page_size, current_page
         val = page_size_dropdown.value
-        page_size = 999999 if val == "All" else int(val)
+        page_size = 999999 if val == "All" else int(val or 50)
         current_page = 1
-        filter_and_render_games(recompute_filters=False)
+        filter_and_render_games(recompute_filters=True)
 
     prev_page_btn.on_click = on_prev_page
     next_page_btn.on_click = on_next_page
@@ -1853,15 +2491,9 @@ async def main(page: ft.Page):
     bottom_pagination_bar = ft.Container(
         padding=get_padding_symmetric(horizontal=8, vertical=6),
         content=ft.Row(
-            alignment="spaceBetween",
+            alignment=get_main_alignment("spaceBetween"),
             controls=[
-                ft.Row(
-                    [
-                        list_mode_switch,
-                        page_info_text,
-                    ],
-                    spacing=16,
-                ),
+                page_info_text,
                 ft.Row(
                     [
                         prev_page_btn,
@@ -1884,38 +2516,43 @@ async def main(page: ft.Page):
         ticked_count = sum(1 for p in config.get("players", []) if p.get("enabled", True))
         total_loaded = len(all_games_map)
 
-        # State 1: Actively fetching game data -> Centered Spinner
+        # State 1: Actively fetching data -> Centered Spinner + Subtitle + ProgressBar
         if is_fetching:
             matching_filters_text.value = "Matching Filters: 0 / 0"
             matching_filters_badge.bgcolor = get_color("bluegrey800")
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
-            games_container.content = build_centered_state(
-                icon_name="sync",
-                icon_color="cyan400",
-                title="Fetching game data...",
-                show_spinner=True,
-                subtitle_control=center_loading_subtitle,
+            show_games_placeholder(
+                build_centered_state(
+                    icon_name="sync",
+                    icon_color="cyan400",
+                    title=loading_title_str,
+                    show_spinner=True,
+                    subtitle_control=center_loading_subtitle,
+                    extra_control=center_progress_bar,
+                )
             )
             page.update()
             return
 
-        # State 2: No players added or selected -> Centered Player Prompt
-        if ticked_count == 0:
+        # State 2: No data loaded yet AND no players selected -> Centered Player Prompt
+        if not has_loaded_once and ticked_count == 0:
             matching_filters_text.value = "Matching Filters: 0 / 0"
             matching_filters_badge.bgcolor = get_color("bluegrey800")
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
-            games_container.content = build_centered_state(
-                icon_name="group_add",
-                icon_color="amber400",
-                title="No players selected.",
-                subtitle=(
-                    "Add at least one Steam player on the left and make sure their checkbox is ticked,\n"
-                    "then click 'Find Common Games' to load your squad's libraries."
-                ),
+            show_games_placeholder(
+                build_centered_state(
+                    icon_name="group_add",
+                    icon_color="amber400",
+                    title="No players selected.",
+                    subtitle=(
+                        "Add at least one Steam player on the left and make sure their checkbox is ticked,\n"
+                        "then click 'Find Common Games' to load all player's libraries."
+                    ),
+                )
             )
             page.update()
             return
@@ -1927,16 +2564,18 @@ async def main(page: ft.Page):
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
-            games_container.content = build_centered_state(
-                icon_name="sports_esports",
-                icon_color="cyan300",
-                title="No game data has been loaded yet.",
-                subtitle="Click 'Find Common Games' on the bottom-left to scan your selected players' libraries.",
+            show_games_placeholder(
+                build_centered_state(
+                    icon_name="sports_esports",
+                    icon_color="cyan300",
+                    title="No game data has been loaded yet.",
+                    subtitle="Click 'Find Common Games' on the bottom-left to scan your selected players' libraries.",
+                )
             )
             page.update()
             return
 
-        if recompute_filters:
+        if recompute_filters or not cached_filtered_games:
             cached_filtered_games = compute_filtered_games()
 
         filtered_games = cached_filtered_games
@@ -1954,20 +2593,20 @@ async def main(page: ft.Page):
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
-            games_container.content = build_centered_state(
-                icon_name="search_off",
-                icon_color="grey500",
-                title="No games match the current filters.",
-                subtitle="Try relaxing your search query, tags, price, or ownership sliders above.",
+            show_games_placeholder(
+                build_centered_state(
+                    icon_name="search_off",
+                    icon_color="grey500",
+                    title="No games match the current filters.",
+                    subtitle="Try relaxing your search query, tags, review score, price, or ownership sliders above.",
+                )
             )
             page.update()
             return
 
         # State 5: Render the scrollable list of matching games
-        games_container.content = games_list_view
         is_small = bool(list_mode_switch.value)
         games_list_view.spacing = 2 if is_small else 6
-        games_list_view.controls.clear()
 
         total_pages = math.ceil(total_count / page_size) if page_size > 0 else 1
         current_page = max(1, min(current_page, total_pages))
@@ -1982,7 +2621,9 @@ async def main(page: ft.Page):
         prev_page_btn.disabled = current_page == 1
         next_page_btn.disabled = current_page >= total_pages
 
-        # Build game card list for active page with # Rank Numbering
+        # Build new controls list and assign atomically so ListView never renders an empty intermediate frame
+        new_cards: List[ft.Control] = []
+
         for idx, game in enumerate(page_games):
             global_rank = start_idx + idx + 1
             owner_names = ", ".join(p.display_name for p in game.owners)
@@ -1995,18 +2636,22 @@ async def main(page: ft.Page):
             else:
                 tag_list = "Not fetched"
 
+            is_unrel = game.is_effectively_unreleased
+            is_unavail = game.is_effectively_unavailable
+
             info_tooltip_text = (
                 f"🎮 #{global_rank} - {game.name}\n"
                 f"• Owners ({len(game.owners)}): {owner_names or 'None'}\n"
                 f"• Wishlist ({len(game.wishlisters)}): {wishlist_names or 'None'}\n"
+                f"• User Reviews: {format_game_reviews(game)}\n"
                 f"• Tags: {tag_list}"
             )
-            if game.is_unreleased:
+            if is_unrel:
                 info_tooltip_text += f"\n• Status: Unreleased ({game.release_date or 'Coming Soon'})"
-            elif game.is_unavailable:
+            elif is_unavail:
                 info_tooltip_text += "\n• Status: Unavailable / Delisted in Steam Store"
             if game.mac_supported is not None:
-                info_tooltip_text += f"\n• macOS: {'Supported' if game.mac_supported else 'No'}"
+                info_tooltip_text += f"\n• MacOS: {'Supported' if game.mac_supported else 'No'}"
 
             badge_font_size = 10 if is_small else 11
             badge_pad = (
@@ -2019,7 +2664,7 @@ async def main(page: ft.Page):
                 content=ft.Text(
                     f"#{global_rank}",
                     size=10 if is_small else 12,
-                    weight="bold",
+                    weight=get_font_weight_bold(),
                     color=get_color("cyan200"),
                 ),
                 bgcolor=get_color("bluegrey900"),
@@ -2060,11 +2705,73 @@ async def main(page: ft.Page):
                 price_text = f"{game.price_str} (-{game.discount_pct}%)" if game.is_on_sale else game.price_str
                 badges.append(
                     ft.Container(
-                        content=ft.Text(price_text, size=badge_font_size, color=get_color("black"), weight="bold"),
+                        content=ft.Text(
+                            price_text,
+                            size=badge_font_size,
+                            color=get_color("black"),
+                            weight=get_font_weight_bold(),
+                        ),
                         bgcolor=price_color,
                         padding=badge_pad,
                         border_radius=4,
                     )
+                )
+
+            # Dark Red "Unavailable" Badge & Dark Orange "Unreleased" Badge
+            if is_unavail:
+                badges.append(
+                    ft.Container(
+                        content=ft.Text(
+                            "Unavailable",
+                            size=badge_font_size,
+                            color=get_color("white"),
+                            weight=get_font_weight_bold(),
+                        ),
+                        bgcolor="#B71C1C",
+                        padding=badge_pad,
+                        border_radius=4,
+                    )
+                )
+            elif is_unrel:
+                badges.append(
+                    ft.Container(
+                        content=ft.Text(
+                            "Unreleased",
+                            size=badge_font_size,
+                            color=get_color("white"),
+                            weight=get_font_weight_bold(),
+                        ),
+                        bgcolor="#BF360C",
+                        padding=badge_pad,
+                        border_radius=4,
+                    )
+                )
+
+            # Right-anchored Blue User Review Badge (shows only review icon + percentage)
+            review_badge = None
+            if game.review_percentage is not None:
+                review_badge = ft.Container(
+                    bgcolor=get_color("blue700"),
+                    padding=badge_pad,
+                    border_radius=4,
+                    tooltip=f"Steam User Reviews: {format_game_reviews(game)}",
+                    content=ft.Row(
+                        tight=True,
+                        spacing=4,
+                        controls=[
+                            ft.Icon(
+                                get_icon("thumb_up"),
+                                size=11 if is_small else 13,
+                                color=get_color("white"),
+                            ),
+                            ft.Text(
+                                f"{game.review_percentage}%",
+                                size=badge_font_size,
+                                weight=get_font_weight_bold(),
+                                color=get_color("white"),
+                            ),
+                        ],
+                    ),
                 )
 
             unavailable_warning_icon = ft.Container(
@@ -2076,10 +2783,11 @@ async def main(page: ft.Page):
                 tooltip="Unavailable / No longer available in the Steam Store",
             )
 
-            if game.is_unavailable:
-                row_bgcolor = get_color("red900")
-            elif game.is_unreleased:
-                row_bgcolor = get_color("amber900")
+            # Row background color at 0.5 opacity for Unavailable (dark red) and Unreleased (orange)
+            if is_unavail:
+                row_bgcolor = get_color_with_opacity(0.5, "red900", "#80B71C1C")
+            elif is_unrel:
+                row_bgcolor = get_color_with_opacity(0.5, "amber900", "#80FF6F00")
             else:
                 row_bgcolor = None
 
@@ -2102,13 +2810,18 @@ async def main(page: ft.Page):
                 on_click=lambda _, url=store_url: open_url(url),
             )
 
-            title_controls = [unavailable_warning_icon] if game.is_unavailable else []
+            right_action_controls = []
+            if review_badge is not None:
+                right_action_controls.append(review_badge)
+            right_action_controls.extend([info_btn, store_btn])
+
+            title_controls = [unavailable_warning_icon] if is_unavail else []
             title_controls.append(
                 ft.Text(
                     game.name,
                     size=12 if is_small else 15,
-                    weight="bold",
-                    overflow="ellipsis",
+                    weight=get_font_weight_bold(),
+                    overflow=get_text_overflow_ellipsis(),
                     max_lines=1,
                     expand=True,
                 )
@@ -2116,19 +2829,18 @@ async def main(page: ft.Page):
 
             if is_small:
                 card = create_card(
-                    bgcolor=row_bgcolor,
                     content=ft.Container(
                         bgcolor=row_bgcolor,
                         border_radius=8,
                         padding=get_padding_only(left=6, top=2, right=14, bottom=2),
                         content=ft.Row(
-                            alignment="spaceBetween",
+                            alignment=get_main_alignment("spaceBetween"),
                             spacing=8,
                             controls=[
                                 rank_badge,
                                 ft.Row(controls=title_controls, spacing=5, expand=True),
                                 ft.Row(controls=badges, spacing=4),
-                                ft.Row(controls=[info_btn, store_btn], spacing=2),
+                                ft.Row(controls=right_action_controls, spacing=4),
                             ],
                         ),
                     ),
@@ -2138,7 +2850,7 @@ async def main(page: ft.Page):
                     src=game.header_image_url,
                     width=110,
                     height=50,
-                    fit="cover",
+                    fit=get_image_fit_cover(),
                     border_radius=4,
                     error_content=ft.Icon(get_icon("videogame_asset"), size=30, color=get_color("grey500")),
                 )
@@ -2154,13 +2866,12 @@ async def main(page: ft.Page):
                 )
 
                 card = create_card(
-                    bgcolor=row_bgcolor,
                     content=ft.Container(
                         bgcolor=row_bgcolor,
                         border_radius=8,
                         padding=get_padding_only(left=8, top=8, right=16, bottom=8),
                         content=ft.Row(
-                            alignment="spaceBetween",
+                            alignment=get_main_alignment("spaceBetween"),
                             controls=[
                                 ft.Row(
                                     controls=[
@@ -2179,30 +2890,30 @@ async def main(page: ft.Page):
                                     expand=True,
                                 ),
                                 ft.Row(
-                                    controls=[info_btn, store_btn],
-                                    spacing=4,
+                                    controls=right_action_controls,
+                                    spacing=6,
                                 ),
                             ],
                         ),
                     ),
                 )
 
-            games_list_view.controls.append(card)
+            new_cards.append(card)
 
+        games_list_view.controls = new_cards
+        show_games_list()
         page.update()
 
-    # Initial Render of Player List & Counters
-    render_player_list()
-    filter_and_render_games()
-
     # ------------------------------------------
-    # LAYOUT BUILD
+    # LAYOUT BUILD (APPROACH 3: 3-COLUMN SPLIT)
     # ------------------------------------------
     left_panel = create_card(
         content=ft.Container(
             padding=15,
             width=380,
+            expand=True,
             content=ft.Column(
+                expand=True,
                 controls=[
                     api_key_header_row,
                     api_key_row,
@@ -2210,42 +2921,27 @@ async def main(page: ft.Page):
                     add_player_header_row,
                     add_player_row,
                     ft.Divider(),
-                    ft.Text("Players", size=16, weight="bold"),
                     player_list_view,
                     ft.Divider(),
-                    submit_btn,
-                ]
+                    ft.Row([submit_btn], alignment=get_main_alignment("center")),
+                ],
             ),
         )
     )
 
-    top_filter_bar = create_card(
+    # Top Row: "Filters" Container (Search Title & Search Tags side-by-side)
+    filters_container = create_card(
         content=ft.Container(
-            padding=10,
+            padding=get_padding_symmetric(horizontal=10, vertical=8),
             content=ft.Column(
-                spacing=8,
+                spacing=4,
                 controls=[
+                    ft.Text("Filters", size=13, weight=get_font_weight_bold(), color=get_color("cyan200")),
                     ft.Row(
-                        alignment="spaceBetween",
-                        spacing=20,
+                        spacing=12,
                         controls=[
                             search_filter,
-                            ft.Row([coop_only_cb, multiplayer_only_cb, macos_only_cb], spacing=10),
-                        ],
-                    ),
-                    ft.Row(controls=[custom_tags_filter]),
-                    ft.Row(
-                        alignment="spaceBetween",
-                        controls=[
-                            ft.Row([min_owned_label, min_owned_slider], spacing=4),
-                            ft.Row([min_wishlist_label, min_wishlist_slider], spacing=4),
-                        ],
-                    ),
-                    ft.Row(
-                        alignment="spaceBetween",
-                        controls=[
-                            ft.Row([discount_label, discount_slider], spacing=4),
-                            ft.Row([max_price_label, max_price_slider], spacing=4),
+                            custom_tags_filter,
                         ],
                     ),
                 ],
@@ -2253,19 +2949,104 @@ async def main(page: ft.Page):
         )
     )
 
-    status_section = ft.Column(
-        spacing=4,
+    # Lower Column 1: "Common Tags" Container (Single compact column of 4 entries with tight vertical padding)
+    common_tags_container = create_card(
+        content=ft.Container(
+            padding=get_padding_symmetric(horizontal=10, vertical=6),
+            width=140,
+            content=ft.Column(
+                spacing=0,
+                tight=True,
+                controls=[
+                    ft.Container(
+                        padding=get_padding_only(bottom=2),
+                        content=ft.Text(
+                            "Common Tags", size=13, weight=get_font_weight_bold(), color=get_color("cyan200")
+                        ),
+                    ),
+                    ft.Container(content=coop_only_cb, height=26),
+                    ft.Container(content=multiplayer_only_cb, height=26),
+                    ft.Container(content=vr_only_cb, height=26),
+                    ft.Container(content=macos_only_cb, height=26),
+                ],
+            ),
+        )
+    )
+
+    # Lower Column 2: "Parameters" Container (3 compact rows of sliders with extra horizontal room)
+    parameters_container = create_card(
+        expand=True,
+        content=ft.Container(
+            padding=get_padding_symmetric(horizontal=10, vertical=6),
+            content=ft.Column(
+                spacing=0,
+                tight=True,
+                controls=[
+                    ft.Text("Parameters", size=13, weight=get_font_weight_bold(), color=get_color("cyan200")),
+                    ft.Row(
+                        spacing=10,
+                        controls=[
+                            ft.Row([min_owned_label, min_owned_slider], spacing=2, expand=1),
+                            ft.Row([min_wishlist_label, min_wishlist_slider], spacing=2, expand=1),
+                        ],
+                    ),
+                    ft.Row(
+                        spacing=10,
+                        controls=[
+                            ft.Row([discount_label, discount_slider], spacing=2, expand=1),
+                            ft.Row([max_price_label, max_price_slider], spacing=2, expand=1),
+                        ],
+                    ),
+                    ft.Row(
+                        spacing=10,
+                        controls=[
+                            ft.Row([min_review_label, min_review_slider], spacing=2, expand=1),
+                            ft.Container(expand=1),
+                        ],
+                    ),
+                ],
+            ),
+        ),
+    )
+
+    # Lower Column 3: "Special Games" Container (Unreleased & Unavailable switches)
+    special_games_container = create_card(
+        content=ft.Container(
+            padding=get_padding_symmetric(horizontal=10, vertical=6),
+            width=155,
+            content=ft.Column(
+                spacing=6,
+                tight=True,
+                controls=[
+                    ft.Text("Special Games", size=13, weight=get_font_weight_bold(), color=get_color("cyan200")),
+                    show_unreleased_switch,
+                    show_unavailable_switch,
+                ],
+            ),
+        )
+    )
+
+    top_filters_area = ft.Column(
+        spacing=2,
+        visible=True,
         controls=[
-            status_text,
-            fetch_progress_bar,
+            filters_container,
+            ft.Row(
+                spacing=6,
+                vertical_alignment=get_cross_alignment("start"),
+                controls=[
+                    common_tags_container,
+                    parameters_container,
+                    special_games_container,
+                ],
+            ),
         ],
     )
 
     right_panel = ft.Column(
         expand=True,
         controls=[
-            top_filter_bar,
-            status_section,
+            top_filters_area,
             top_summary_bar,
             ft.Divider(height=4),
             games_container,
@@ -2274,6 +3055,7 @@ async def main(page: ft.Page):
         ],
     )
 
+    # Add controls to page first so all controls are mounted before initial state updates
     page.add(
         ft.Row(
             expand=True,
@@ -2281,6 +3063,10 @@ async def main(page: ft.Page):
             spacing=15,
         )
     )
+
+    # Initial Render of Player List & Counters
+    render_player_list()
+    filter_and_render_games(recompute_filters=True)
 
 
 if __name__ == "__main__":
