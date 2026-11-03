@@ -6,6 +6,14 @@ from typing import Dict, List, Optional, Set
 
 import flet as ft
 
+from src.core.filtering import (
+    MAX_PRICE_SLIDER_CAP,
+    SORT_DEFAULT_DESCENDING,
+    SORT_OPTIONS,
+    FilterSettings,
+    filter_games,
+    sort_games,
+)
 from src.core.models import GameItem, Player
 from src.core.steam_client import SteamClient
 from src.ui.widgets import (
@@ -42,7 +50,6 @@ from src.ui.widgets import (
 )
 
 CONFIG_FILE = Path("steam_friends_game_finder_config.json")
-MAX_PRICE_SLIDER_CAP = 70  # Values 0..69 represent $0..$69; 70 represents "∞"
 
 
 # ==========================================
@@ -990,8 +997,6 @@ async def build_app(page: ft.Page):
     # Sort menu: sort field + ascending/descending, opened from a compact button in the summary bar
     # Picking a field resets the direction to that field's natural default (cheapest price first, highest
     # count/review/discount first); the direction items flip it afterwards.
-    SORT_OPTIONS = ["Owned", "Wishlisted", "User Reviews", "Price", "Discount"]
-    SORT_DEFAULT_DESCENDING = {"Owned": True, "Wishlisted": True, "User Reviews": True, "Price": False, "Discount": True}
     sort_by_value = "Owned"
     sort_descending = True
 
@@ -1226,106 +1231,29 @@ async def build_app(page: ft.Page):
 
     # Helper to compute filtered GameItems
     def compute_filtered_games() -> List[GameItem]:
-        search_query = (search_filter.value or "").lower().strip()
         raw_tags_query = custom_tags_filter.value or ""
-        required_tags = [t.strip().lower() for t in raw_tags_query.split(",") if t.strip()]
-
-        sort_by = sort_by_value
-        min_owned = int(round(min_owned_slider.value or 0))
-        min_wishlist = int(round(min_wishlist_slider.value or 0))
-        min_discount = int(round(discount_slider.value or 0))
-        min_review = int(round(min_review_slider.value or 0))
         max_price_val = int(
             round(max_price_slider.value if max_price_slider.value is not None else MAX_PRICE_SLIDER_CAP)
         )
-        is_price_limited = max_price_val < MAX_PRICE_SLIDER_CAP
-        include_unreleased = bool(show_unreleased_switch.value)
-        include_unavailable = bool(show_unavailable_switch.value)
-        require_coop = bool(coop_only_cb.value)
-        require_multiplayer = bool(multiplayer_only_cb.value)
-        require_vr = bool(vr_only_cb.value)
-        require_macos = bool(macos_only_cb.value)
-        require_online = bool(online_only_cb.value)
-        require_linux = bool(linux_only_cb.value)
-
-        filtered: List[GameItem] = []
-        for g in all_games_map.values():
-            if search_query and search_query not in g.name.lower():
-                continue
-
-            # Unreleased & Unavailable Store Filters (Show logic)
-            if not include_unreleased and g.is_effectively_unreleased:
-                continue
-            if not include_unavailable and g.is_effectively_unavailable:
-                continue
-
-            # Owned & Wishlist Count Threshold Filters
-            if owned_wishlist_mode == "OR":
-                # A threshold of 0 matches everything, so it is left out of the OR
-                owned_ok = min_owned > 0 and len(g.owners) >= min_owned
-                wishlist_ok = min_wishlist > 0 and len(g.wishlisters) >= min_wishlist
-                if not (owned_ok or wishlist_ok):
-                    continue
-            else:
-                if len(g.owners) < min_owned:
-                    continue
-                if len(g.wishlisters) < min_wishlist:
-                    continue
-
-            # Category & Platform Filters
-            if require_coop and not g.is_coop:
-                continue
-            if require_multiplayer and not g.is_multiplayer:
-                continue
-            if require_online and not g.is_online:
-                continue
-            if require_vr and not g.is_vr:
-                continue
-            if require_macos and g.mac_supported is not True:
-                continue
-            if require_linux and g.linux_supported is not True:
-                continue
-
-            # Custom Comma-Separated Tags Filter
-            if required_tags:
-                game_tags_lower = [lbl.lower() for lbl in (g.categories | g.genres)]
-                if not all(any(req_t in gt for gt in game_tags_lower) for req_t in required_tags):
-                    continue
-
-            # User Review Percentage Filter
-            if min_review > 0:
-                if g.review_percentage is None or g.review_percentage < min_review:
-                    continue
-
-            # Discount Filter (applies to all games when min_discount > 0)
-            if min_discount > 0:
-                if not g.is_on_sale or g.discount_pct < min_discount:
-                    continue
-
-            # Max Price Filter (uses final_price after applied discounts; free games have final_price == 0.0)
-            if is_price_limited:
-                if g.final_price is None or g.final_price > float(max_price_val):
-                    continue
-
-            filtered.append(g)
-
-        # Primary sort value per field; None (no reviews / no price) always goes to the end
-        primary_value_by_field = {
-            "Wishlisted": lambda g: len(g.wishlisters),
-            "User Reviews": lambda g: g.review_percentage,
-            "Price": lambda g: g.final_price,
-            "Discount": lambda g: g.discount_pct,
-        }
-        primary_value = primary_value_by_field.get(sort_by, lambda g: len(g.owners))
-
-        # Tie-break first, then a stable sort on the primary value (reverse keeps ties in order)
-        filtered.sort(key=lambda g: (-len(g.owners), -len(g.wishlisters), g.name.lower()))
-        with_value = [g for g in filtered if primary_value(g) is not None]
-        without_value = [g for g in filtered if primary_value(g) is None]
-        with_value.sort(key=primary_value, reverse=sort_descending)
-        filtered = with_value + without_value
-
-        return filtered
+        settings = FilterSettings(
+            search_query=(search_filter.value or "").lower().strip(),
+            required_tags=tuple(t.strip().lower() for t in raw_tags_query.split(",") if t.strip()),
+            min_owned=int(round(min_owned_slider.value or 0)),
+            min_wishlist=int(round(min_wishlist_slider.value or 0)),
+            owned_wishlist_mode=owned_wishlist_mode,
+            min_discount=int(round(discount_slider.value or 0)),
+            min_review=int(round(min_review_slider.value or 0)),
+            max_price=max_price_val if max_price_val < MAX_PRICE_SLIDER_CAP else None,
+            include_unreleased=bool(show_unreleased_switch.value),
+            include_unavailable=bool(show_unavailable_switch.value),
+            require_coop=bool(coop_only_cb.value),
+            require_multiplayer=bool(multiplayer_only_cb.value),
+            require_online=bool(online_only_cb.value),
+            require_vr=bool(vr_only_cb.value),
+            require_macos=bool(macos_only_cb.value),
+            require_linux=bool(linux_only_cb.value),
+        )
+        return sort_games(filter_games(all_games_map.values(), settings), sort_by_value, sort_descending)
 
     # ------------------------------------------
     # CORE LOGIC: DELTA FETCH & AGGREGATE GAMES
