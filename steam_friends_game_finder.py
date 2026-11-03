@@ -188,6 +188,15 @@ def get_padding_only(left: int = 0, top: int = 0, right: int = 0, bottom: int = 
     return get_padding_symmetric(horizontal=max(left, right), vertical=max(top, bottom))
 
 
+def get_margin_only(left: int = 0, top: int = 0, right: int = 0, bottom: int = 0):
+    """Creates directional margin safely across Flet versions."""
+    for attr in ("Margin", "margin"):
+        cls = getattr(ft, attr, None)
+        if cls and hasattr(cls, "only"):
+            return cls.only(left=left, top=top, right=right, bottom=bottom)
+    return None
+
+
 def get_always_scroll():
     """Returns ALWAYS scroll mode safely across Flet versions."""
     if hasattr(ft, "ScrollMode") and hasattr(ft.ScrollMode, "ALWAYS"):
@@ -381,7 +390,7 @@ def create_button(
 def create_icon_button(
     icon_name: str,
     on_click=None,
-    tooltip: Optional[str] = None,
+    tooltip=None,  # str or ft.Tooltip
     icon_color: Optional[str] = None,
     icon_size: Optional[int] = None,
     compact: bool = False,
@@ -424,6 +433,66 @@ def create_option(text: str, key: Optional[str] = None):
         if cls:
             return cls(key=str(val_key), text=text)
     return text
+
+
+def create_tooltip(message: str, wait_ms: int):
+    """Creates a Tooltip with a custom hover delay, falling back to a plain string tooltip."""
+    if hasattr(ft, "Tooltip"):
+        try:
+            return ft.Tooltip(message=message, wait_duration=wait_ms)
+        except Exception:
+            pass
+    return message
+
+
+def create_link_text(text: str, url: str, size: int, color: str = "white") -> ft.Text:
+    """Creates a single-line bold Text whose content is a clickable link (underlined on hover)."""
+    style = ft.TextStyle(color=get_color(color))
+    span = ft.TextSpan(text, style=style, on_click=lambda _: open_url(url))
+
+    def set_hover(hovered: bool):
+        decoration_cls = getattr(ft, "TextDecoration", None)
+        if decoration_cls is not None:
+            style.decoration = decoration_cls.UNDERLINE if hovered else decoration_cls.NONE
+        try:
+            link_text.update()
+        except Exception:
+            pass
+
+    try:
+        span.on_enter = lambda _: set_hover(True)
+        span.on_exit = lambda _: set_hover(False)
+    except Exception:
+        pass
+
+    link_text = ft.Text(
+        spans=[span],
+        size=size,
+        weight=get_font_weight_bold(),
+        overflow=get_text_overflow_ellipsis(),
+        max_lines=1,
+        expand=True,
+        tooltip="Open in Steam Store",
+    )
+    return link_text
+
+
+def create_menu_item(text: Optional[str] = None, icon: Optional[str] = None, checked: Optional[bool] = None, on_click=None):
+    """Creates a PopupMenuItem across Flet releases (`text` in older versions, `content` in 1.0+).
+    Calling it without text creates a divider item."""
+    if text is None:
+        return ft.PopupMenuItem()
+    kwargs = {}
+    if icon:
+        kwargs["icon"] = get_icon(icon)
+    if checked is not None:
+        kwargs["checked"] = checked
+    if on_click is not None:
+        kwargs["on_click"] = on_click
+    try:
+        return ft.PopupMenuItem(text=text, **kwargs)
+    except TypeError:
+        return ft.PopupMenuItem(content=text, **kwargs)
 
 
 def create_dropdown(options, value=None, label=None, width=None, on_change=None):
@@ -613,6 +682,15 @@ class GameItem:
         all_labels = self.categories | self.genres
         return any(
             "multiplayer" in c.lower() or "multi-player" in c.lower() or "pvp" in c.lower()
+            for c in all_labels
+        )
+
+    @property
+    def is_online(self) -> bool:
+        """Checks categories & tags for online play (Online Co-op / Online PvP / MMO), excluding local-only co-op."""
+        all_labels = self.categories | self.genres
+        return any(
+            "online" in c.lower() or "mmo" in c.lower() or "massively multiplayer" in c.lower()
             for c in all_labels
         )
 
@@ -1113,7 +1191,7 @@ class SteamClient:
 async def main(page: ft.Page):
     page.title = "Steam Friends Game Finder"
     page.theme_mode = ft.ThemeMode.DARK
-    page.padding = 20
+    page.padding = get_padding_symmetric(horizontal=20, vertical=8) or 20
     configure_always_visible_scrollbars(page)
 
     # Default window dimensions: 1330 x 960
@@ -1343,6 +1421,42 @@ async def main(page: ft.Page):
             )
             tags_text = ft.Text(f"• Tags & Categories: {all_tags_str}", size=12)
 
+            # Owners / Wishlisted in their own tinted section, coloured like the Owned / Wishlisted badges
+            total_players = len(players) or 1
+
+            def player_line(icon_name: str, icon_color: str, label: str, count: int, names: str) -> ft.Row:
+                return ft.Row(
+                    spacing=8,
+                    vertical_alignment=get_cross_alignment("start"),
+                    controls=[
+                        ft.Icon(get_icon(icon_name), size=18, color=get_color(icon_color)),
+                        ft.Text(
+                            f"{label} ({count}/{total_players})",
+                            size=12,
+                            weight=get_font_weight_bold(),
+                            color=get_color(icon_color),
+                            width=120,
+                        ),
+                        ft.Text(names, size=12, expand=True),
+                    ],
+                )
+
+            players_section = ft.Container(
+                bgcolor=get_color_with_opacity(0.08, "#00838F", "#1400838F"),
+                border=get_border_all(1, get_color_with_opacity(0.4, "#00838F", "#6600838F")),
+                border_radius=6,
+                padding=get_padding_symmetric(horizontal=10, vertical=8),
+                content=ft.Column(
+                    spacing=6,
+                    tight=True,
+                    controls=[
+                        ft.Text("Players", weight=get_font_weight_bold(), size=13, color=get_color("cyan200")),
+                        player_line("check_circle", "green400", "Owned", len(game.owners), owner_names),
+                        player_line("bookmark", "amber400", "Wishlisted", len(game.wishlisters), wishlist_names),
+                    ],
+                ),
+            )
+
             dlg = ft.AlertDialog(
                 title=ft.Text(game.name, weight=get_font_weight_bold(), size=18),
                 content=ft.Container(
@@ -1360,12 +1474,11 @@ async def main(page: ft.Page):
                                 ),
                             ),
                             price_text,
+                            players_section,
                             ft.Divider(),
                             ft.Text("Short Description:", weight=get_font_weight_bold(), size=13),
                             desc_text,
                             ft.Divider(),
-                            ft.Text(f"• Owners ({len(game.owners)}): {owner_names}", size=12),
-                            ft.Text(f"• Wishlisted ({len(game.wishlisters)}): {wishlist_names}", size=12),
                             review_text,
                             dev_text,
                             release_text,
@@ -1725,6 +1838,72 @@ async def main(page: ft.Page):
         on_release_commit=on_filter_change,
     )
 
+    # AND / OR connector between the Min Owned and Min Wishlist filters
+    owned_wishlist_mode = "AND"
+    owned_wishlist_mode_text = ft.Text(
+        "AND", size=11, weight=get_font_weight_bold(), color=get_color("white")
+    )
+
+    def apply_owned_wishlist_mode_style():
+        is_or = owned_wishlist_mode == "OR"
+        owned_wishlist_mode_text.value = owned_wishlist_mode
+        owned_wishlist_mode_chip.bgcolor = "#EF6C00" if is_or else "#00838F"
+        owned_wishlist_mode_chip.border = get_border_all(1.5, "#FFA726" if is_or else "#26C6DA")
+        owned_wishlist_mode_chip.tooltip = (
+            "OR: games matching Min Owned or Min Wishlist (a filter at 0 is ignored). Click to switch to AND."
+            if is_or
+            else "AND: games must match both Min Owned and Min Wishlist. Click to switch to OR."
+        )
+        # Tint the linked group in the mode colour so it stands apart from the other sliders
+        owned_wishlist_group.bgcolor = (
+            get_color_with_opacity(0.08, "#EF6C00", "#14EF6C00")
+            if is_or
+            else get_color_with_opacity(0.08, "#00838F", "#1400838F")
+        )
+        owned_wishlist_group.border = get_border_all(
+            1,
+            get_color_with_opacity(0.4, "#EF6C00", "#66EF6C00")
+            if is_or
+            else get_color_with_opacity(0.4, "#00838F", "#6600838F"),
+        )
+
+    def toggle_owned_wishlist_mode(e=None):
+        nonlocal owned_wishlist_mode, current_page
+        owned_wishlist_mode = "OR" if owned_wishlist_mode == "AND" else "AND"
+        apply_owned_wishlist_mode_style()
+        current_page = 1
+        filter_and_render_games(recompute_filters=True)
+
+    owned_wishlist_mode_chip = ft.Container(
+        content=owned_wishlist_mode_text,
+        width=40,
+        alignment=get_center_alignment(),
+        border_radius=10,
+        padding=get_padding_symmetric(horizontal=0, vertical=3),
+        on_click=toggle_owned_wishlist_mode,
+    )
+    if get_click_cursor() is not None:
+        try:
+            owned_wishlist_mode_chip.mouse_cursor = get_click_cursor()
+        except Exception:
+            pass
+
+    # Linked Min Owned / Min Wishlist pair with the AND/OR connector between them
+    owned_wishlist_group = ft.Container(
+        # 9px + the 1px border keeps the labels aligned with the 10px padding of the other sections
+        padding=get_padding_symmetric(horizontal=9, vertical=3),
+        content=ft.Row(
+            spacing=6,
+            vertical_alignment=get_cross_alignment("center"),
+            controls=[
+                ft.Row([min_owned_label, min_owned_slider], spacing=2, expand=1),
+                owned_wishlist_mode_chip,
+                ft.Row([min_wishlist_label, min_wishlist_slider], spacing=2, expand=1),
+            ],
+        ),
+    )
+    apply_owned_wishlist_mode_style()
+
     def update_match_sliders() -> bool:
         """
         Updates owned and wishlist slider max values.
@@ -1941,19 +2120,92 @@ async def main(page: ft.Page):
     add_player_btn = create_button("Add Player", icon="add", on_click=on_add_player)
     add_player_row = ft.Row([new_player_input, add_player_btn])
 
-    sort_dropdown = create_dropdown(
-        label="Sort By",
-        value="Owned",
-        options=[
-            create_option("Owned"),
-            create_option("Wishlisted"),
-            create_option("User Reviews"),
-            create_option("Price"),
-            create_option("Discount"),
-        ],
-        width=165,
-        on_change=on_filter_change,
+    # Sort menu: sort field + ascending/descending, opened from a compact button in the summary bar
+    # Picking a field resets the direction to that field's natural default (cheapest price first, highest
+    # count/review/discount first); the direction items flip it afterwards.
+    SORT_OPTIONS = ["Owned", "Wishlisted", "User Reviews", "Price", "Discount"]
+    SORT_DEFAULT_DESCENDING = {"Owned": True, "Wishlisted": True, "User Reviews": True, "Price": False, "Discount": True}
+    sort_by_value = "Owned"
+    sort_descending = True
+
+    sort_button_text = ft.Text("Owned", size=12, weight=get_font_weight_bold(), color=get_color("white"))
+    sort_direction_icon = ft.Icon(get_icon("arrow_downward"), size=16, color=get_color("white"))
+
+    def refresh_sort_menu():
+        sort_button_text.value = sort_by_value
+        sort_direction_icon.name = get_icon("arrow_downward" if sort_descending else "arrow_upward")
+        for name, item in sort_field_items.items():
+            item.checked = name == sort_by_value
+        sort_ascending_item.checked = not sort_descending
+        sort_descending_item.checked = sort_descending
+
+    def make_sort_field_handler(name: str):
+        def handler(e=None):
+            nonlocal sort_by_value, sort_descending
+            sort_by_value = name
+            sort_descending = SORT_DEFAULT_DESCENDING[name]
+            refresh_sort_menu()
+            on_filter_change()
+        return handler
+
+    def make_sort_direction_handler(descending: bool):
+        def handler(e=None):
+            nonlocal sort_descending
+            sort_descending = descending
+            refresh_sort_menu()
+            on_filter_change()
+        return handler
+
+    SORT_ICONS = {
+        "Owned": "tag",
+        "Wishlisted": "tag",
+        "User Reviews": "percent",
+        "Price": "attach_money",
+        "Discount": "percent",
+    }
+    sort_field_items = {
+        name: create_menu_item(name, icon=SORT_ICONS[name], on_click=make_sort_field_handler(name))
+        for name in SORT_OPTIONS
+    }
+    sort_ascending_item = create_menu_item(
+        "Ascending", icon="arrow_upward", on_click=make_sort_direction_handler(False)
     )
+    sort_descending_item = create_menu_item(
+        "Descending", icon="arrow_downward", on_click=make_sort_direction_handler(True)
+    )
+
+    sort_menu_button = ft.PopupMenuButton(
+        tooltip="Sort games",
+        items=[
+            *sort_field_items.values(),
+            create_menu_item(),
+            sort_ascending_item,
+            sort_descending_item,
+        ],
+        content=ft.Container(
+            bgcolor=get_color("bluegrey800"),
+            border=get_border_all(1, "bluegrey600"),
+            border_radius=6,
+            padding=get_padding_symmetric(horizontal=12, vertical=6),
+            content=ft.Row(
+                tight=True,
+                spacing=6,
+                controls=[
+                    ft.Icon(get_icon("sort"), size=16, color=get_color("white")),
+                    ft.Text("Sort:", size=12, color=get_color("grey300")),
+                    sort_button_text,
+                    sort_direction_icon,
+                ],
+            ),
+        ),
+    )
+    # Open/close animation 2x faster than Flutter's 300ms popup menu default
+    if hasattr(ft, "AnimationStyle"):
+        try:
+            sort_menu_button.popup_animation_style = ft.AnimationStyle(duration=150, reverse_duration=150)
+        except Exception:
+            pass
+    refresh_sort_menu()
 
     list_mode_switch = create_switch(
         label="List Mode",
@@ -2007,6 +2259,12 @@ async def main(page: ft.Page):
     )
     macos_only_cb = create_checkbox(
         label="MacOS", value=False, on_change=on_filter_change, label_size=12, compact=True
+    )
+    online_only_cb = create_checkbox(
+        label="Online", value=False, on_change=on_filter_change, label_size=12, compact=True
+    )
+    linux_only_cb = create_checkbox(
+        label="Linux", value=False, on_change=on_filter_change, label_size=12, compact=True
     )
 
     # Keep BOTH games_list_view and games_state_container permanently mounted inside games_container
@@ -2105,7 +2363,7 @@ async def main(page: ft.Page):
         raw_tags_query = custom_tags_filter.value or ""
         required_tags = [t.strip().lower() for t in raw_tags_query.split(",") if t.strip()]
 
-        sort_by = sort_dropdown.value or "Owned"
+        sort_by = sort_by_value
         min_owned = int(round(min_owned_slider.value or 0))
         min_wishlist = int(round(min_wishlist_slider.value or 0))
         min_discount = int(round(discount_slider.value or 0))
@@ -2120,6 +2378,8 @@ async def main(page: ft.Page):
         require_multiplayer = bool(multiplayer_only_cb.value)
         require_vr = bool(vr_only_cb.value)
         require_macos = bool(macos_only_cb.value)
+        require_online = bool(online_only_cb.value)
+        require_linux = bool(linux_only_cb.value)
 
         filtered: List[GameItem] = []
         for g in all_games_map.values():
@@ -2133,19 +2393,30 @@ async def main(page: ft.Page):
                 continue
 
             # Owned & Wishlist Count Threshold Filters
-            if len(g.owners) < min_owned:
-                continue
-            if len(g.wishlisters) < min_wishlist:
-                continue
+            if owned_wishlist_mode == "OR":
+                # A threshold of 0 matches everything, so it is left out of the OR
+                owned_ok = min_owned > 0 and len(g.owners) >= min_owned
+                wishlist_ok = min_wishlist > 0 and len(g.wishlisters) >= min_wishlist
+                if not (owned_ok or wishlist_ok):
+                    continue
+            else:
+                if len(g.owners) < min_owned:
+                    continue
+                if len(g.wishlisters) < min_wishlist:
+                    continue
 
             # Category & Platform Filters
             if require_coop and not g.is_coop:
                 continue
             if require_multiplayer and not g.is_multiplayer:
                 continue
+            if require_online and not g.is_online:
+                continue
             if require_vr and not g.is_vr:
                 continue
             if require_macos and g.mac_supported is not True:
+                continue
+            if require_linux and g.linux_supported is not True:
                 continue
 
             # Custom Comma-Separated Tags Filter
@@ -2171,40 +2442,21 @@ async def main(page: ft.Page):
 
             filtered.append(g)
 
-        if sort_by == "Wishlisted":
-            filtered.sort(key=lambda g: (-len(g.wishlisters), -len(g.owners), g.name.lower()))
-        elif sort_by == "User Reviews":
-            filtered.sort(
-                key=lambda g: (
-                    g.review_percentage is None,
-                    -(g.review_percentage if g.review_percentage is not None else -1),
-                    -len(g.owners),
-                    -len(g.wishlisters),
-                    g.name.lower(),
-                )
-            )
-        elif sort_by == "Price":
-            filtered.sort(
-                key=lambda g: (
-                    g.final_price is None,
-                    g.final_price if g.final_price is not None else float("inf"),
-                    -len(g.owners),
-                    -len(g.wishlisters),
-                    g.name.lower(),
-                )
-            )
-        elif sort_by == "Discount":
-            filtered.sort(
-                key=lambda g: (
-                    -g.discount_pct,
-                    g.final_price if g.final_price is not None else float("inf"),
-                    -len(g.owners),
-                    -len(g.wishlisters),
-                    g.name.lower(),
-                )
-            )
-        else:
-            filtered.sort(key=lambda g: (-len(g.owners), -len(g.wishlisters), g.name.lower()))
+        # Primary sort value per field; None (no reviews / no price) always goes to the end
+        primary_value_by_field = {
+            "Wishlisted": lambda g: len(g.wishlisters),
+            "User Reviews": lambda g: g.review_percentage,
+            "Price": lambda g: g.final_price,
+            "Discount": lambda g: g.discount_pct,
+        }
+        primary_value = primary_value_by_field.get(sort_by, lambda g: len(g.owners))
+
+        # Tie-break first, then a stable sort on the primary value (reverse keeps ties in order)
+        filtered.sort(key=lambda g: (-len(g.owners), -len(g.wishlisters), g.name.lower()))
+        with_value = [g for g in filtered if primary_value(g) is not None]
+        without_value = [g for g in filtered if primary_value(g) is None]
+        with_value.sort(key=primary_value, reverse=sort_descending)
+        filtered = with_value + without_value
 
         return filtered
 
@@ -2430,7 +2682,7 @@ async def main(page: ft.Page):
             pass
 
     top_summary_bar = ft.Container(
-        padding=get_padding_symmetric(horizontal=4, vertical=2),
+        padding=get_padding_symmetric(horizontal=4, vertical=0),
         content=ft.Row(
             alignment=get_main_alignment("spaceBetween"),
             controls=[
@@ -2442,7 +2694,7 @@ async def main(page: ft.Page):
                     ],
                     spacing=12,
                 ),
-                sort_dropdown,
+                sort_menu_button,
             ],
         ),
     )
@@ -2489,6 +2741,8 @@ async def main(page: ft.Page):
     )
 
     bottom_pagination_bar = ft.Container(
+        # Fixed height so the left panel's bottom divider can line up with the divider above this bar
+        height=60,
         padding=get_padding_symmetric(horizontal=8, vertical=6),
         content=ft.Row(
             alignment=get_main_alignment("spaceBetween"),
@@ -2793,7 +3047,8 @@ async def main(page: ft.Page):
 
             info_btn = create_icon_button(
                 "info_outline",
-                tooltip=info_tooltip_text,
+                # Half of Flet's default 800ms hover delay
+                tooltip=create_tooltip(info_tooltip_text, wait_ms=400),
                 icon_color="cyan300",
                 icon_size=16 if is_small else None,
                 compact=is_small,
@@ -2816,16 +3071,7 @@ async def main(page: ft.Page):
             right_action_controls.extend([info_btn, store_btn])
 
             title_controls = [unavailable_warning_icon] if is_unavail else []
-            title_controls.append(
-                ft.Text(
-                    game.name,
-                    size=12 if is_small else 15,
-                    weight=get_font_weight_bold(),
-                    overflow=get_text_overflow_ellipsis(),
-                    max_lines=1,
-                    expand=True,
-                )
-            )
+            title_controls.append(create_link_text(game.name, store_url, size=12 if is_small else 15))
 
             if is_small:
                 card = create_card(
@@ -2861,7 +3107,7 @@ async def main(page: ft.Page):
                     height=50,
                     bgcolor=get_color("bluegrey900"),
                     border_radius=4,
-                    tooltip=f"Click to view details for #{global_rank} {game.name}",
+                    tooltip=create_tooltip(f"{info_tooltip_text}\n\nClick to view details", wait_ms=400),
                     on_click=lambda _, g=game: open_game_details_dialog(g),
                 )
 
@@ -2909,7 +3155,8 @@ async def main(page: ft.Page):
     # ------------------------------------------
     left_panel = create_card(
         content=ft.Container(
-            padding=15,
+            # No bottom padding: the button area below handles its own spacing to line up with the right panel
+            padding=get_padding_only(left=15, top=8, right=15, bottom=0) or 15,
             width=380,
             expand=True,
             content=ft.Column(
@@ -2922,8 +3169,21 @@ async def main(page: ft.Page):
                     add_player_row,
                     ft.Divider(),
                     player_list_view,
-                    ft.Divider(),
-                    ft.Row([submit_btn], alignment=get_main_alignment("center")),
+                    # Divider + button area mirroring the right panel's bottom, measured from the window content edge:
+                    # divider line at 4 card margin + 60 + 2 = 60 pagination bar + 4 spacing + 2, and the button
+                    # centred at 4 card margin + 26 (60 minus 8 top padding, halved) = the bar's 30px centre line
+                    ft.Column(
+                        spacing=0,
+                        controls=[
+                            ft.Divider(height=4),
+                            ft.Container(
+                                height=60,
+                                padding=get_padding_only(top=8),
+                                alignment=get_center_alignment(),
+                                content=submit_btn,
+                            ),
+                        ],
+                    ),
                 ],
             ),
         )
@@ -2966,8 +3226,10 @@ async def main(page: ft.Page):
                     ),
                     ft.Container(content=coop_only_cb, height=26),
                     ft.Container(content=multiplayer_only_cb, height=26),
+                    ft.Container(content=online_only_cb, height=26),
                     ft.Container(content=vr_only_cb, height=26),
                     ft.Container(content=macos_only_cb, height=26),
+                    ft.Container(content=linux_only_cb, height=26),
                 ],
             ),
         )
@@ -2977,32 +3239,48 @@ async def main(page: ft.Page):
     parameters_container = create_card(
         expand=True,
         content=ft.Container(
-            padding=get_padding_symmetric(horizontal=10, vertical=6),
+            # Minimal horizontal padding so the linked owned/wishlist background nearly spans the card width;
+            # each section below applies the horizontal padding itself, keeping all labels aligned.
+            padding=get_padding_symmetric(horizontal=1, vertical=4),
             content=ft.Column(
-                spacing=0,
+                spacing=4,
                 tight=True,
                 controls=[
-                    ft.Text("Parameters", size=13, weight=get_font_weight_bold(), color=get_color("cyan200")),
-                    ft.Row(
-                        spacing=10,
-                        controls=[
-                            ft.Row([min_owned_label, min_owned_slider], spacing=2, expand=1),
-                            ft.Row([min_wishlist_label, min_wishlist_slider], spacing=2, expand=1),
-                        ],
+                    ft.Container(
+                        padding=get_padding_symmetric(horizontal=10, vertical=0),
+                        content=ft.Text(
+                            "Parameters", size=13, weight=get_font_weight_bold(), color=get_color("cyan200")
+                        ),
                     ),
-                    ft.Row(
-                        spacing=10,
-                        controls=[
-                            ft.Row([discount_label, discount_slider], spacing=2, expand=1),
-                            ft.Row([max_price_label, max_price_slider], spacing=2, expand=1),
-                        ],
-                    ),
-                    ft.Row(
-                        spacing=10,
-                        controls=[
-                            ft.Row([min_review_label, min_review_slider], spacing=2, expand=1),
-                            ft.Container(expand=1),
-                        ],
+                    owned_wishlist_group,
+                    # Remaining sliders; the middle spacer matches the AND/OR chip width so columns line up.
+                    # 9px + the 1px border keeps the labels aligned with the other sections.
+                    ft.Container(
+                        bgcolor=get_color_with_opacity(0.08, "#00838F", "#1400838F"),
+                        border=get_border_all(1, get_color_with_opacity(0.4, "#00838F", "#6600838F")),
+                        padding=get_padding_symmetric(horizontal=9, vertical=3),
+                        content=ft.Column(
+                            spacing=0,
+                            tight=True,
+                            controls=[
+                                ft.Row(
+                                    spacing=6,
+                                    controls=[
+                                        ft.Row([discount_label, discount_slider], spacing=2, expand=1),
+                                        ft.Container(width=40),
+                                        ft.Row([max_price_label, max_price_slider], spacing=2, expand=1),
+                                    ],
+                                ),
+                                ft.Row(
+                                    spacing=6,
+                                    controls=[
+                                        ft.Row([min_review_label, min_review_slider], spacing=2, expand=1),
+                                        ft.Container(width=40),
+                                        ft.Container(expand=1),
+                                    ],
+                                ),
+                            ],
+                        ),
                     ),
                 ],
             ),
@@ -3026,8 +3304,17 @@ async def main(page: ft.Page):
         )
     )
 
+    # Tighter gap between the text filters card and the cards below it: 1px bottom margin instead of the
+    # default 4px, and no column spacing (gap goes from 4 + 2 + 4 = 10px down to 1 + 0 + 4 = 5px)
+    filters_card_margin = get_margin_only(left=4, top=4, right=4, bottom=1)
+    if filters_card_margin is not None:
+        try:
+            filters_container.margin = filters_card_margin
+        except Exception:
+            pass
+
     top_filters_area = ft.Column(
-        spacing=2,
+        spacing=0,
         visible=True,
         controls=[
             filters_container,
@@ -3045,6 +3332,7 @@ async def main(page: ft.Page):
 
     right_panel = ft.Column(
         expand=True,
+        spacing=4,
         controls=[
             top_filters_area,
             top_summary_bar,
