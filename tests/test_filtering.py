@@ -55,6 +55,29 @@ def test_or_mode_leaves_zero_threshold_out(players, make_game):
     assert names(filter_games(games, s)) == ["owned by 2"]
 
 
+def test_or_mode_leaves_zero_owned_threshold_out(players, make_game):
+    p = players
+    games = [
+        make_game(1, "wishlisted by 2", wishlisters=p[:2]),
+        make_game(2, "wishlisted by 1", wishlisters=p[:1]),
+        make_game(3, "owned by 3", owners=p[:3]),
+    ]
+    s = FilterSettings(min_owned=0, min_wishlist=2, owned_wishlist_mode="OR")
+    assert names(filter_games(games, s)) == ["wishlisted by 2"]
+
+
+@pytest.mark.parametrize("mode", ["AND", "OR"])
+def test_both_thresholds_zero_means_no_constraint(players, make_game, mode):
+    p = players
+    games = [
+        make_game(1, "nobody"),
+        make_game(2, "owned", owners=p[:1]),
+        make_game(3, "wishlisted", wishlisters=p[:1]),
+    ]
+    s = FilterSettings(min_owned=0, min_wishlist=0, owned_wishlist_mode=mode)
+    assert names(filter_games(games, s)) == ["nobody", "owned", "wishlisted"]
+
+
 # ------------------------------------------------------------------
 # Text search
 # ------------------------------------------------------------------
@@ -98,16 +121,20 @@ def test_min_review_excludes_unknown_reviews(make_game):
     assert len(filter_games(games, no_owner_floor(min_review=0))) == 4
 
 
-def test_min_discount_needs_sale_and_enough_discount(make_game):
+def test_min_discount_needs_enough_discount(make_game):
     games = [
         make_game(1, "big sale", price=5.0, discount=50),
         make_game(2, "small sale", price=5.0, discount=10),
         make_game(3, "no sale", price=5.0),
     ]
-    stale = make_game(4, "pct without sale flag", price=5.0)
-    stale.discount_pct = 75
-    games.append(stale)
     assert names(filter_games(games, no_owner_floor(min_discount=25))) == ["big sale"]
+
+
+def test_min_discount_counts_discount_pct_as_on_sale(make_game):
+    """A discount alone puts the game on sale; there is no separate flag to disagree with it."""
+    game = make_game(1, "discount set directly", price=5.0)
+    game.discount_pct = 75
+    assert names(filter_games([game], no_owner_floor(min_discount=25))) == ["discount set directly"]
 
 
 def test_max_price_none_means_no_limit(make_game):

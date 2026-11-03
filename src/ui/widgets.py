@@ -1,4 +1,3 @@
-import webbrowser
 from typing import Callable, Optional
 
 import flet as ft
@@ -7,14 +6,6 @@ import flet as ft
 # ==========================================
 # FLET CONTROL FACTORIES & EVENT SYNC HELPERS (Flet 1.0)
 # ==========================================
-def open_url(url: str):
-    """Opens a URL in the user's default system web browser."""
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
-
-
 def sync_event_value(e, control: Optional[ft.Control] = None):
     """
     Ensures `control.value` is synchronized with the incoming event payload (`e.control.value` / `e.data`)
@@ -290,8 +281,9 @@ def create_tooltip(message: str, wait_ms: int):
     return ft.Tooltip(message=message, wait_duration=wait_ms)
 
 
-def create_link_text(text: str, url: str, size: int, color: str = "white") -> ft.Text:
-    """Creates a single-line bold Text whose content is a clickable link (underlined on hover)."""
+def create_link_text(text: str, on_click: Callable, size: int, color: str = "white") -> ft.Text:
+    """Creates a single-line bold Text whose content is a clickable link (underlined on hover).
+    `on_click` receives the click event and is responsible for opening the link."""
     style = ft.TextStyle(color=get_color(color))
 
     def set_hover(hovered: bool):
@@ -304,7 +296,7 @@ def create_link_text(text: str, url: str, size: int, color: str = "white") -> ft
     span = ft.TextSpan(
         text,
         style=style,
-        on_click=lambda _: open_url(url),
+        on_click=on_click,
         on_enter=lambda _: set_hover(True),
         on_exit=lambda _: set_hover(False),
     )

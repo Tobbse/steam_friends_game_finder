@@ -39,7 +39,6 @@ class GameItem:
         self.price_str: str = ""
         self.final_price: Optional[float] = None  # Numeric price in dollars AFTER applied discounts
         self.discount_pct: int = 0
-        self.is_on_sale: bool = False
         self.review_percentage: Optional[int] = None  # 0..100 positive user review percentage
         self.review_desc: str = ""
         self.price_fetched: bool = False
@@ -70,6 +69,11 @@ class GameItem:
         if self.is_effectively_unreleased:
             return False
         return bool(self.is_unavailable)
+
+    @property
+    def is_on_sale(self) -> bool:
+        """A game with any discount is on sale."""
+        return self.discount_pct > 0
 
     @property
     def is_free(self) -> bool:

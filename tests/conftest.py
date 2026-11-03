@@ -18,7 +18,6 @@ def make_game():
         g.final_price = price
         g.price_str = "" if price is None else ("Free" if price == 0 else f"${price:.2f}")
         g.discount_pct = discount
-        g.is_on_sale = discount > 0
         g.review_percentage = review
         g.categories = set(labels)
         g.genres = set(genres)

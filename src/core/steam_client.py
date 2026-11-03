@@ -356,19 +356,16 @@ class SteamClient:
                                     g.price_str = ""
                                     g.final_price = None
                                     g.discount_pct = 0
-                                    g.is_on_sale = False
                                     g.price_fetched = False
                                 else:
                                     g.price_str = formatted_price
                                     g.final_price = parsed_price
                                     g.discount_pct = int(bpo.get("discount_pct", 0) or 0)
-                                    g.is_on_sale = g.discount_pct > 0
                                     g.price_fetched = parsed_price is not None or bool(formatted_price)
                             elif (item.get("is_free") or item.get("is_free_temporarily")) and not g.is_effectively_unreleased:
                                 g.price_str = "Free to Play"
                                 g.final_price = 0.0
                                 g.discount_pct = 0
-                                g.is_on_sale = False
                                 g.price_fetched = True
 
                             # Secondary check: if a game is visible on the store, has no release date timestamp,
@@ -474,7 +471,6 @@ class SteamClient:
                     if price_overview:
                         game.discount_pct = int(price_overview.get("discount_percent", 0) or 0)
                         game.price_str = str(price_overview.get("final_formatted") or "").strip()
-                        game.is_on_sale = game.discount_pct > 0
                         if price_overview.get("final") is not None:
                             try:
                                 game.final_price = int(price_overview["final"]) / 100.0

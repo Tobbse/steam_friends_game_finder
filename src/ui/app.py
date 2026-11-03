@@ -1,7 +1,5 @@
 import asyncio
-import json
 import math
-from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import flet as ft
@@ -16,6 +14,7 @@ from src.core.filtering import (
 )
 from src.core.models import GameItem, Player
 from src.core.steam_client import SteamClient
+from src.platform.base import Platform
 from src.ui.widgets import (
     bind_change_handlers,
     configure_always_visible_scrollbars,
@@ -46,16 +45,13 @@ from src.ui.widgets import (
     get_padding_only,
     get_padding_symmetric,
     get_text_align_center,
-    open_url,
 )
-
-CONFIG_FILE = Path("steam_friends_game_finder_config.json")
 
 
 # ==========================================
 # MAIN FLET GUI APPLICATION
 # ==========================================
-async def build_app(page: ft.Page):
+async def build_app(page: ft.Page, platform: Platform):
     page.title = "Steam Friends Game Finder"
     page.theme_mode = ft.ThemeMode.DARK
     page.padding = get_padding_symmetric(horizontal=20, vertical=8) or 20
@@ -331,7 +327,7 @@ async def build_app(page: ft.Page):
                     content=ft.Column(
                         controls=[
                             ft.Image(
-                                src=game.header_image_url,
+                                src=platform.image_src(game.header_image_url),
                                 width=460,
                                 height=215,
                                 fit=get_image_fit_cover(),
@@ -361,7 +357,7 @@ async def build_app(page: ft.Page):
                     create_button(
                         "Steam Store",
                         icon="open_in_new",
-                        on_click=lambda _: open_url(f"https://store.steampowered.com/app/{game.appid}/"),
+                        on_click=lambda _: platform.open_url(f"https://store.steampowered.com/app/{game.appid}/"),
                     ),
                     create_button("Close", on_click=lambda _: close_dialog(dlg)),
                 ],
@@ -407,23 +403,14 @@ async def build_app(page: ft.Page):
                     except Exception as err_bg:
                         print(f"Background fetch error: {err_bg}")
 
-                asyncio.create_task(fetch_background())
+                platform.spawn(fetch_background)
 
         except Exception as err:
             print(f"Error displaying details: {err}")
             notify(f"Error displaying details: {err}")
 
     # Load / Save Config
-    config = {"api_key": "", "players": []}
-    if CONFIG_FILE.exists():
-        try:
-            loaded = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                config["api_key"] = str(loaded.get("api_key", ""))
-                if isinstance(loaded.get("players"), list):
-                    config["players"] = loaded["players"]
-        except Exception:
-            pass
+    config = await platform.load_config()
 
     def sort_config_players():
         """Sorts players so enabled players are at the top, and alphabetically within each group."""
@@ -431,12 +418,9 @@ async def build_app(page: ft.Page):
             key=lambda p: (not p.get("enabled", True), p.get("display_name", "").lower())
         )
 
-    def save_config():
+    async def save_config():
         sort_config_players()
-        try:
-            CONFIG_FILE.write_text(json.dumps(config, indent=2), encoding="utf-8")
-        except OSError as err:
-            print(f"Warning: Could not save config file: {err}")
+        await platform.save_config(config)
 
     # App State & In-Memory Session Caches
     players: List[Player] = []
@@ -480,7 +464,7 @@ async def build_app(page: ft.Page):
     api_key_help_btn = create_icon_button(
         "help_outline",
         tooltip="Get your Steam API Key from the official Steam website",
-        on_click=lambda _: open_url("https://steamcommunity.com/dev/apikey"),
+        on_click=lambda _: platform.open_url("https://steamcommunity.com/dev/apikey"),
     )
 
     api_key_row = ft.Row([api_key_field, api_key_help_btn])
@@ -824,7 +808,7 @@ async def build_app(page: ft.Page):
             def make_toggle(p):
                 def toggle_handler(e):
                     p["enabled"] = bool(e.control.value)
-                    save_config()
+                    platform.spawn(save_config)
                     render_player_list()
                     filter_and_render_games(recompute_filters=True)
                 return toggle_handler
@@ -833,7 +817,7 @@ async def build_app(page: ft.Page):
                 def delete_handler(e):
                     config["players"].remove(p)
                     session_players_cache.pop(p.get("steam_id", ""), None)
-                    save_config()
+                    platform.spawn(save_config)
                     render_player_list()
                     filter_and_render_games(recompute_filters=True)
                     notify(f"Removed '{p['display_name']}' from player list.")
@@ -938,7 +922,7 @@ async def build_app(page: ft.Page):
             return
 
         config["api_key"] = api_key
-        save_config()
+        await save_config()
 
         is_fetching = True
         loading_title_str = "Resolving Steam Profile..."
@@ -979,7 +963,7 @@ async def build_app(page: ft.Page):
                 "enabled": True,
             }
             config.setdefault("players", []).append(new_entry)
-            save_config()
+            await save_config()
 
             new_player_input.value = ""
             notify(f"Added player '{temp_player.display_name}'!")
@@ -1269,7 +1253,7 @@ async def build_app(page: ft.Page):
             return
 
         config["api_key"] = api_key
-        save_config()
+        await save_config()
 
         active_players_data = [
             p for p in config.get("players", []) if p.get("enabled", True)
@@ -1333,7 +1317,7 @@ async def build_app(page: ft.Page):
                             config_updated = True
 
                     if config_updated:
-                        save_config()
+                        await save_config()
 
                     # Check for API / Network errors vs Private libraries
                     errored_players = [
@@ -1857,7 +1841,7 @@ async def build_app(page: ft.Page):
                 icon_color="blue400",
                 icon_size=16 if is_small else None,
                 compact=is_small,
-                on_click=lambda _, url=store_url: open_url(url),
+                on_click=lambda _, url=store_url: platform.open_url(url),
             )
 
             right_action_controls = []
@@ -1866,7 +1850,13 @@ async def build_app(page: ft.Page):
             right_action_controls.extend([info_btn, store_btn])
 
             title_controls = [unavailable_warning_icon] if is_unavail else []
-            title_controls.append(create_link_text(game.name, store_url, size=12 if is_small else 15))
+            title_controls.append(
+                create_link_text(
+                    game.name,
+                    on_click=lambda _, url=store_url: platform.open_url(url),
+                    size=12 if is_small else 15,
+                )
+            )
 
             if is_small:
                 card = create_card(
@@ -1888,7 +1878,7 @@ async def build_app(page: ft.Page):
                 )
             else:
                 thumb_img = ft.Image(
-                    src=game.header_image_url,
+                    src=platform.image_src(game.header_image_url),
                     width=110,
                     height=50,
                     fit=get_image_fit_cover(),

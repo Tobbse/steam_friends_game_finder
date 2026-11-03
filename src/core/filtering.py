@@ -45,10 +45,12 @@ def matches(game: GameItem, settings: FilterSettings) -> bool:
 
     # Owned & Wishlist Count Threshold Filters
     if settings.owned_wishlist_mode == "OR":
-        # A threshold of 0 matches everything, so it is left out of the OR
+        # A threshold of 0 matches everything, so it is left out of the OR.
+        # With both left out there is no constraint (same as AND with both at 0).
+        no_constraint = settings.min_owned <= 0 and settings.min_wishlist <= 0
         owned_ok = settings.min_owned > 0 and len(game.owners) >= settings.min_owned
         wishlist_ok = settings.min_wishlist > 0 and len(game.wishlisters) >= settings.min_wishlist
-        if not (owned_ok or wishlist_ok):
+        if not (no_constraint or owned_ok or wishlist_ok):
             return False
     else:
         if len(game.owners) < settings.min_owned:
