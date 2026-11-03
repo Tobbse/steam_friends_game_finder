@@ -31,7 +31,7 @@ UNRELEASED_KEYWORDS = (
 
 
 # ==========================================
-# FLET CROSS-VERSION COMPATIBILITY & EVENT SYNC HELPERS
+# FLET CONTROL FACTORIES & EVENT SYNC HELPERS (Flet 1.0)
 # ==========================================
 def open_url(url: str):
     """Opens a URL in the user's default system web browser."""
@@ -44,7 +44,7 @@ def open_url(url: str):
 def sync_event_value(e, control: Optional[ft.Control] = None):
     """
     Ensures `control.value` is synchronized with the incoming event payload (`e.control.value` / `e.data`)
-    across Flet versions without needlessly mutating active gesture controls.
+    without needlessly mutating active gesture controls.
     """
     if e is None:
         return
@@ -72,7 +72,8 @@ def bind_change_handlers(
     handler: Optional[Callable],
     include_submit_and_blur: bool = False,
 ):
-    """Binds change/select/submit/blur handlers safely across Flet versions."""
+    """Binds the wrapped handler to whichever change/select (and optionally submit/blur) events the control has.
+    Dropdown exposes `on_select`; Checkbox, Switch and TextField expose `on_change`."""
     if handler is None:
         return control
 
@@ -80,20 +81,12 @@ def bind_change_handlers(
         sync_event_value(e, control)
         handler(e)
 
-    for attr in ("on_change", "on_select"):
-        if hasattr(control, attr):
-            try:
-                setattr(control, attr, wrapped_handler)
-            except Exception:
-                pass
-
+    attrs = ["on_change", "on_select"]
     if include_submit_and_blur:
-        for attr in ("on_submit", "on_blur"):
-            if hasattr(control, attr):
-                try:
-                    setattr(control, attr, wrapped_handler)
-                except Exception:
-                    pass
+        attrs += ["on_submit", "on_blur"]
+    for attr in attrs:
+        if hasattr(control, attr):
+            setattr(control, attr, wrapped_handler)
 
     return control
 
@@ -106,26 +99,14 @@ def create_checkbox(
     label_size: Optional[int] = None,
     compact: bool = False,
 ) -> ft.Checkbox:
-    """Creates a Checkbox with synchronized event handling and optional compact styling across Flet versions."""
-    kwargs = {"label": label, "value": value}
-    if expand is not None:
-        kwargs["expand"] = expand
-    if label_size is not None and hasattr(ft, "TextStyle"):
-        try:
-            kwargs["label_style"] = ft.TextStyle(size=label_size)
-        except Exception:
-            pass
-    if compact and hasattr(ft, "VisualDensity"):
-        vd_cls = getattr(ft, "VisualDensity", None)
-        if vd_cls and hasattr(vd_cls, "COMPACT"):
-            kwargs["visual_density"] = vd_cls.COMPACT
-
-    try:
-        cb = ft.Checkbox(**kwargs)
-    except TypeError:
-        kwargs.pop("label_style", None)
-        kwargs.pop("visual_density", None)
-        cb = ft.Checkbox(**kwargs)
+    """Creates a Checkbox with synchronized event handling and optional compact styling."""
+    cb = ft.Checkbox(
+        label=label,
+        value=value,
+        expand=expand,
+        label_style=ft.TextStyle(size=label_size) if label_size is not None else None,
+        visual_density=ft.VisualDensity.COMPACT if compact else None,
+    )
     return bind_change_handlers(cb, on_change)
 
 
@@ -134,7 +115,7 @@ def create_switch(
     value: bool = False,
     on_change: Optional[Callable] = None,
 ) -> ft.Switch:
-    """Creates a Switch with synchronized event handling across Flet versions."""
+    """Creates a Switch with synchronized event handling."""
     sw = ft.Switch(label=label, value=value)
     return bind_change_handlers(sw, on_change)
 
@@ -163,194 +144,120 @@ def create_slider(
     if on_drag_label is not None:
         sl.on_change = on_drag_label
     if on_release_commit is not None:
-        if hasattr(sl, "on_change_end"):
-            sl.on_change_end = on_release_commit
-        else:
-            sl.on_change = on_release_commit
+        sl.on_change_end = on_release_commit
     return sl
 
 
 def get_padding_symmetric(horizontal: int = 0, vertical: int = 0):
-    """Creates symmetric padding safely across Flet versions."""
-    for attr in ("Padding", "padding"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, "symmetric"):
-            return cls.symmetric(horizontal=horizontal, vertical=vertical)
-    return None
+    """Creates symmetric padding."""
+    return ft.Padding.symmetric(horizontal=horizontal, vertical=vertical)
 
 
 def get_padding_only(left: int = 0, top: int = 0, right: int = 0, bottom: int = 0):
-    """Creates directional padding safely across Flet versions."""
-    for attr in ("Padding", "padding"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, "only"):
-            return cls.only(left=left, top=top, right=right, bottom=bottom)
-    return get_padding_symmetric(horizontal=max(left, right), vertical=max(top, bottom))
+    """Creates directional padding."""
+    return ft.Padding.only(left=left, top=top, right=right, bottom=bottom)
 
 
 def get_margin_only(left: int = 0, top: int = 0, right: int = 0, bottom: int = 0):
-    """Creates directional margin safely across Flet versions."""
-    for attr in ("Margin", "margin"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, "only"):
-            return cls.only(left=left, top=top, right=right, bottom=bottom)
-    return None
+    """Creates directional margin."""
+    return ft.Margin.only(left=left, top=top, right=right, bottom=bottom)
 
 
 def get_always_scroll():
-    """Returns ALWAYS scroll mode safely across Flet versions."""
-    if hasattr(ft, "ScrollMode") and hasattr(ft.ScrollMode, "ALWAYS"):
-        return ft.ScrollMode.ALWAYS
-    return "always"
+    """Returns ALWAYS scroll mode."""
+    return ft.ScrollMode.ALWAYS
 
 
 def get_click_cursor():
-    """Returns the clickable hand MouseCursor across Flet versions."""
-    if hasattr(ft, "MouseCursor") and hasattr(ft.MouseCursor, "CLICK"):
-        return ft.MouseCursor.CLICK
-    return None
+    """Returns the clickable hand MouseCursor."""
+    return ft.MouseCursor.CLICK
 
 
 def get_image_fit_cover():
-    """Returns COVER image fit safely across Flet 0.2x and 1.0+."""
-    for attr in ("BoxFit", "ImageFit"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, "COVER"):
-            return cls.COVER
-    return "cover"
+    """Returns COVER image fit."""
+    return ft.BoxFit.COVER
 
 
 def get_font_weight_bold():
-    """Returns BOLD font weight safely across Flet versions."""
-    cls = getattr(ft, "FontWeight", None)
-    if cls and hasattr(cls, "BOLD"):
-        return cls.BOLD
-    return "bold"
+    """Returns BOLD font weight."""
+    return ft.FontWeight.BOLD
 
 
 def get_text_align_center():
-    """Returns CENTER text alignment safely across Flet versions."""
-    cls = getattr(ft, "TextAlign", None)
-    if cls and hasattr(cls, "CENTER"):
-        return cls.CENTER
-    return "center"
+    """Returns CENTER text alignment."""
+    return ft.TextAlign.CENTER
 
 
 def get_text_overflow_ellipsis():
-    """Returns ELLIPSIS text overflow safely across Flet versions."""
-    cls = getattr(ft, "TextOverflow", None)
-    if cls and hasattr(cls, "ELLIPSIS"):
-        return cls.ELLIPSIS
-    return "ellipsis"
+    """Returns ELLIPSIS text overflow."""
+    return ft.TextOverflow.ELLIPSIS
+
+
+_MAIN_ALIGNMENT_NAMES = {
+    "spaceBetween": "SPACE_BETWEEN",
+    "center": "CENTER",
+    "end": "END",
+    "start": "START",
+}
 
 
 def get_main_alignment(name: str):
-    """Resolves MainAxisAlignment safely across Flet versions."""
-    cls = getattr(ft, "MainAxisAlignment", None)
-    if cls:
-        mapping = {
-            "spaceBetween": "SPACE_BETWEEN",
-            "center": "CENTER",
-            "end": "END",
-            "start": "START",
-        }
-        attr = mapping.get(name, name.upper())
-        if hasattr(cls, attr):
-            return getattr(cls, attr)
-    return name
+    """Resolves a MainAxisAlignment from a short name like "spaceBetween" or "center"."""
+    return getattr(ft.MainAxisAlignment, _MAIN_ALIGNMENT_NAMES.get(name, name.upper()), name)
 
 
 def get_cross_alignment(name: str):
-    """Resolves CrossAxisAlignment safely across Flet versions."""
-    cls = getattr(ft, "CrossAxisAlignment", None)
-    if cls:
-        attr = name.upper()
-        if hasattr(cls, attr):
-            return getattr(cls, attr)
-    return name
+    """Resolves a CrossAxisAlignment from a short name like "start" or "center"."""
+    return getattr(ft.CrossAxisAlignment, name.upper(), name)
 
 
 def configure_always_visible_scrollbars(page: ft.Page):
     """Configures page themes so scrollbars are always visible on all scrollable containers."""
-    sb_theme_cls = getattr(ft, "ScrollBarTheme", getattr(ft, "ScrollbarTheme", None))
-    if sb_theme_cls and hasattr(ft, "Theme"):
-        try:
-            sb_theme = sb_theme_cls(thumb_visibility=True, track_visibility=True)
-            page.theme = ft.Theme(scrollbar_theme=sb_theme)
-            page.dark_theme = ft.Theme(scrollbar_theme=sb_theme)
-        except Exception:
-            pass
+    sb_theme = ft.ScrollbarTheme(thumb_visibility=True, track_visibility=True)
+    page.theme = ft.Theme(scrollbar_theme=sb_theme)
+    page.dark_theme = ft.Theme(scrollbar_theme=sb_theme)
 
 
 def get_icon(name: str):
-    """Resolves icon enums safely across Flet versions."""
+    """Resolves an icon name like "search" to `ft.Icons.SEARCH`. Non-strings pass through;
+    unknown names fall back to the lowercase string."""
     if not isinstance(name, str):
         return name
-    name_upper = name.upper()
-    for attr in ("Icons", "icons"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, name_upper):
-            return getattr(cls, name_upper)
-    return name.lower()
+    return getattr(ft.Icons, name.upper(), name.lower())
 
 
 def get_color(name: str):
-    """Resolves color enums safely across Flet versions."""
+    """Resolves a color name like "white" to `ft.Colors.WHITE`. Hex strings and non-strings pass through.
+    Names without a matching enum member (Flet 1.0 spells shades as e.g. `CYAN_200`) fall back to the
+    lowercase string, which is the same value Flet uses for that color (e.g. "cyan200")."""
     if not isinstance(name, str) or name.startswith("#"):
         return name
-    name_upper = name.upper()
-    for attr in ("Colors", "colors"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, name_upper):
-            return getattr(cls, name_upper)
-    return name.lower()
+    return getattr(ft.Colors, name.upper(), name.lower())
 
 
 def get_color_with_opacity(opacity: float, color_name: str, fallback_hex: str) -> str:
-    """Returns a color with opacity safely across Flet versions, with an #AARRGGBB hex fallback."""
-    resolved = get_color(color_name)
-    for attr in ("Colors", "colors"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, "with_opacity"):
-            try:
-                return cls.with_opacity(opacity, resolved)
-            except Exception:
-                pass
-    return fallback_hex
+    """Returns `color_name` at the given opacity as a Flet "color,opacity" string.
+    `fallback_hex` (#AARRGGBB) is only used if the opacity is out of range: Flet 1.0's `with_opacity`
+    validates the opacity but not the color."""
+    try:
+        return ft.Colors.with_opacity(opacity, get_color(color_name))
+    except (TypeError, ValueError):
+        return fallback_hex
 
 
 def get_center_alignment():
-    """Returns center alignment safely across all Flet versions."""
-    if hasattr(ft, "alignment") and hasattr(ft.alignment, "center"):
-        return ft.alignment.center
-    if hasattr(ft, "Alignment"):
-        return ft.Alignment(0, 0)
-    return None
+    """Returns center alignment."""
+    return ft.Alignment.CENTER
 
 
 def get_border_all(width: float = 1.0, color: str = "#42A5F5"):
-    """Creates a uniform border safely across Flet versions."""
-    for attr in ("Border", "border"):
-        cls = getattr(ft, attr, None)
-        if cls and hasattr(cls, "all"):
-            try:
-                return cls.all(width, get_color(color))
-            except Exception:
-                pass
-    return None
+    """Creates a uniform border."""
+    return ft.Border.all(width, get_color(color))
 
 
 def create_card(content: ft.Control, bgcolor: Optional[str] = None, expand: bool = False) -> ft.Card:
-    """Creates a Card safely across Flet versions (handling bgcolor vs color differences)."""
-    kwargs = {"content": content}
-    if expand:
-        kwargs["expand"] = True
-    if bgcolor is not None:
-        try:
-            return ft.Card(bgcolor=bgcolor, **kwargs)
-        except TypeError:
-            pass
-    return ft.Card(**kwargs)
+    """Creates a Card with an optional background color."""
+    return ft.Card(content=content, bgcolor=bgcolor, expand=expand or None)
 
 
 def create_button(
@@ -361,30 +268,20 @@ def create_button(
     visible: bool = True,
     disabled: bool = False,
 ):
-    """Creates a button compatible with both Flet 1.0+ and older versions, with a hand cursor on hover."""
-    btn_cls = getattr(ft, "Button", getattr(ft, "ElevatedButton", None))
-    kwargs = {"visible": visible, "disabled": disabled}
-    if icon:
-        kwargs["icon"] = get_icon(icon)
+    """Creates a Button with a hand cursor on hover (added to `style` unless it already sets one)."""
+    if style is None:
+        style = ft.ButtonStyle(mouse_cursor=ft.MouseCursor.CLICK)
+    elif style.mouse_cursor is None:
+        style.mouse_cursor = ft.MouseCursor.CLICK
 
-    click_cursor = get_click_cursor()
-    if style is not None:
-        if click_cursor is not None and getattr(style, "mouse_cursor", None) is None:
-            try:
-                style.mouse_cursor = click_cursor
-            except Exception:
-                pass
-        kwargs["style"] = style
-    elif click_cursor is not None and hasattr(ft, "ButtonStyle"):
-        try:
-            kwargs["style"] = ft.ButtonStyle(mouse_cursor=click_cursor)
-        except Exception:
-            pass
-
-    btn = btn_cls(text, **kwargs)
-    if on_click:
-        btn.on_click = on_click
-    return btn
+    return ft.Button(
+        content=text,
+        icon=get_icon(icon) if icon else None,
+        style=style,
+        visible=visible,
+        disabled=disabled,
+        on_click=on_click,
+    )
 
 
 def create_icon_button(
@@ -395,75 +292,48 @@ def create_icon_button(
     icon_size: Optional[int] = None,
     compact: bool = False,
 ):
-    """Creates an IconButton guaranteed to work across Flet releases, with a hand cursor on hover."""
-    icon_val = get_icon(icon_name)
-    kwargs = {}
-    if tooltip:
-        kwargs["tooltip"] = tooltip
-    if icon_color:
-        kwargs["icon_color"] = get_color(icon_color)
-    if icon_size is not None:
-        kwargs["icon_size"] = icon_size
-    if compact:
-        kwargs["width"] = 28
-        kwargs["height"] = 28
-        kwargs["padding"] = get_padding_symmetric(horizontal=2, vertical=2)
-
-    click_cursor = get_click_cursor()
-    if click_cursor is not None:
-        kwargs["mouse_cursor"] = click_cursor
-
-    try:
-        btn = ft.IconButton(icon=icon_val, **kwargs)
-    except Exception:
-        safe_kwargs = {k: v for k, v in kwargs.items() if k in ("tooltip", "icon_color", "icon_size")}
-        btn = ft.IconButton(icon=icon_val, **safe_kwargs)
-    if on_click:
-        btn.on_click = on_click
-    return btn
+    """Creates an IconButton with a hand cursor on hover."""
+    return ft.IconButton(
+        icon=get_icon(icon_name),
+        tooltip=tooltip or None,
+        icon_color=get_color(icon_color) if icon_color else None,
+        icon_size=icon_size,
+        width=28 if compact else None,
+        height=28 if compact else None,
+        padding=get_padding_symmetric(horizontal=2, vertical=2) if compact else None,
+        mouse_cursor=ft.MouseCursor.CLICK,
+        on_click=on_click,
+    )
 
 
 def create_option(text: str, key: Optional[str] = None):
-    """Creates a dropdown option compatible across Flet releases."""
-    val_key = key if key is not None else text
-    if hasattr(ft, "dropdown") and hasattr(ft.dropdown, "Option"):
-        return ft.dropdown.Option(key=str(val_key), text=text)
-    for attr in ("Option", "DropdownOption"):
-        cls = getattr(ft, attr, None)
-        if cls:
-            return cls(key=str(val_key), text=text)
-    return text
+    """Creates a dropdown option; the key defaults to the text."""
+    return ft.DropdownOption(key=str(key if key is not None else text), text=text)
 
 
 def create_tooltip(message: str, wait_ms: int):
-    """Creates a Tooltip with a custom hover delay, falling back to a plain string tooltip."""
-    if hasattr(ft, "Tooltip"):
-        try:
-            return ft.Tooltip(message=message, wait_duration=wait_ms)
-        except Exception:
-            pass
-    return message
+    """Creates a Tooltip with a custom hover delay in milliseconds."""
+    return ft.Tooltip(message=message, wait_duration=wait_ms)
 
 
 def create_link_text(text: str, url: str, size: int, color: str = "white") -> ft.Text:
     """Creates a single-line bold Text whose content is a clickable link (underlined on hover)."""
     style = ft.TextStyle(color=get_color(color))
-    span = ft.TextSpan(text, style=style, on_click=lambda _: open_url(url))
 
     def set_hover(hovered: bool):
-        decoration_cls = getattr(ft, "TextDecoration", None)
-        if decoration_cls is not None:
-            style.decoration = decoration_cls.UNDERLINE if hovered else decoration_cls.NONE
+        style.decoration = ft.TextDecoration.UNDERLINE if hovered else ft.TextDecoration.NONE
         try:
             link_text.update()
         except Exception:
-            pass
+            pass  # Not yet mounted on a page.
 
-    try:
-        span.on_enter = lambda _: set_hover(True)
-        span.on_exit = lambda _: set_hover(False)
-    except Exception:
-        pass
+    span = ft.TextSpan(
+        text,
+        style=style,
+        on_click=lambda _: open_url(url),
+        on_enter=lambda _: set_hover(True),
+        on_exit=lambda _: set_hover(False),
+    )
 
     link_text = ft.Text(
         spans=[span],
@@ -478,37 +348,27 @@ def create_link_text(text: str, url: str, size: int, color: str = "white") -> ft
 
 
 def create_menu_item(text: Optional[str] = None, icon: Optional[str] = None, checked: Optional[bool] = None, on_click=None):
-    """Creates a PopupMenuItem across Flet releases (`text` in older versions, `content` in 1.0+).
-    Calling it without text creates a divider item."""
+    """Creates a PopupMenuItem. Calling it without text creates a divider item."""
     if text is None:
         return ft.PopupMenuItem()
-    kwargs = {}
-    if icon:
-        kwargs["icon"] = get_icon(icon)
-    if checked is not None:
-        kwargs["checked"] = checked
-    if on_click is not None:
-        kwargs["on_click"] = on_click
-    try:
-        return ft.PopupMenuItem(text=text, **kwargs)
-    except TypeError:
-        return ft.PopupMenuItem(content=text, **kwargs)
+    return ft.PopupMenuItem(
+        content=text,
+        icon=get_icon(icon) if icon else None,
+        checked=checked,
+        on_click=on_click,
+    )
 
 
 def create_dropdown(options, value=None, label=None, width=None, on_change=None):
-    """Creates a Dropdown control safely across Flet versions."""
+    """Creates a Dropdown control with synchronized event handling."""
     kwargs = {k: v for k, v in (("label", label), ("value", value), ("width", width)) if v is not None}
     dd = ft.Dropdown(options=options, **kwargs)
     return bind_change_handlers(dd, on_change)
 
 
 def create_badge_layout(controls):
-    """Creates a Wrap layout if supported by Flet, falling back to Row."""
-    if hasattr(ft, "Wrap"):
-        try:
-            return ft.Wrap(controls=controls, spacing=6, run_spacing=4)
-        except Exception:
-            pass
+    """Lays out badges in a single Row.
+    Flet 1.0 has no `ft.Wrap`, so badges have always rendered in a non-wrapping Row."""
     return ft.Row(controls=controls, spacing=6)
 
 
