@@ -6,14 +6,14 @@ from typing import Awaitable, Callable, Optional
 import flet as ft
 
 DEFAULT_CONFIG_PATH = Path("steam_friends_game_finder_config.json")
-# The config file's name before it was renamed. Only read as a fallback; never written or removed.
-LEGACY_CONFIG_NAME = "steam_finder_config.json"
 
 
 class DesktopPlatform:
     """Platform for the native desktop app: system browser, local JSON config file."""
 
     name = "desktop"
+    api_key_warning_extra = ""
+    squad_backup_note = ""
 
     def __init__(self, page: ft.Page, config_path: Optional[Path] = None):
         self.page = page
@@ -22,6 +22,13 @@ class DesktopPlatform:
     @property
     def storage_description(self) -> str:
         return f"on disk in {self.config_path.name}"
+
+    @property
+    def import_hint(self) -> str:
+        return (
+            "Paste a squad code (SSF1:...) or the contents of a config file "
+            f"({self.config_path.name})"
+        )
 
     def open_url(self, url: str) -> None:
         """Opens a URL in the user's default system web browser."""
@@ -58,10 +65,6 @@ class DesktopPlatform:
     async def load_config(self) -> dict:
         config = {"api_key": "", "players": []}
         path = self.config_path
-        if not path.exists():
-            legacy_path = path.with_name(LEGACY_CONFIG_NAME)
-            if legacy_path.exists():
-                path = legacy_path
         if path.exists():
             try:
                 loaded = json.loads(path.read_text(encoding="utf-8"))

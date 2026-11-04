@@ -17,6 +17,12 @@ class Platform(Protocol):
     # Where the config (API key + players) is kept, as a phrase that fits after "saved"/"stored",
     # e.g. "on disk in steam_friends_game_finder_config.json". Only used for UI wording.
     storage_description: str
+    # Extra sentence after the API-key storage warning, or "".
+    api_key_warning_extra: str
+    # Extra sentence after the "Backup/share" line in the add-player help, or "".
+    squad_backup_note: str
+    # Hint text in the Import Squad field: what can be pasted.
+    import_hint: str
 
     def open_url(self, url: str) -> None:
         """Opens `url` in a browser on the user's device."""

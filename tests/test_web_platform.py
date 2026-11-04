@@ -203,7 +203,28 @@ def test_default_services_are_flet_services():
     platform = WebPlatform(FakePage())
     assert isinstance(platform._storage, ft.SharedPreferences)
     assert isinstance(platform._clipboard, ft.Clipboard)
-    assert isinstance(platform._url_launcher, ft.UrlLauncher)
+    # Created lazily on the first open_url, so no launcher service is registered per session.
+    assert platform._url_launcher is None
+
+
+def test_url_launcher_created_lazily_once_in_session(monkeypatch):
+    created = []
+
+    class RecordingLauncher(FakeLauncher):
+        def __init__(self):
+            super().__init__()
+            created.append(self)
+
+    monkeypatch.setattr(ft, "UrlLauncher", RecordingLauncher)
+    page = FakePage()
+    platform = WebPlatform(page, storage=FakeStorage(), clipboard=FakeClipboard())
+    assert created == []
+    platform.open_url("https://a.test/")
+    platform.open_url("https://b.test/")
+    for handler, args in page.tasks:
+        asyncio.run(handler(*args))
+    assert len(created) == 1
+    assert created[0].launched == ["https://a.test/", "https://b.test/"]
 
 
 def test_spawn_calls_page_run_task():
@@ -361,9 +382,14 @@ def test_load_validates_fields():
         "extra": 1,
     })
     platform = make(storage=FakeStorage({STORAGE_KEY: raw}))
+    # Players are returned as stored; build_app sanitizes them on both platforms.
     assert asyncio.run(platform.load_config()) == {
         "api_key": "key",
-        "players": [{"steam_id": "76561197960287930", "display_name": "Gabe", "enabled": True}],
+        "players": [
+            {"steam_id": "76561197960287930", "display_name": "Gabe"},
+            {"steam_id": "not-an-id"},
+            "junk",
+        ],
     }
 
 
@@ -389,6 +415,20 @@ def flet_page_context():
     token = _context_page.set(page)
     yield page
     _context_page.reset(token)
+
+
+def test_web_wording_attributes():
+    platform = make()
+    assert platform.api_key_warning_extra == (
+        "It is sent to the app server only to make Steam requests. Don't use this on shared computers."
+    )
+    assert platform.squad_backup_note == (
+        "Discord may occasionally clear Activity storage, so keep a squad code handy."
+    )
+    assert platform.import_hint == (
+        "Paste a squad code (SSF1:...) or the contents of the desktop app's config file "
+        "(steam_friends_game_finder_config.json)"
+    )
 
 
 def test_storage_description_mentions_browser():

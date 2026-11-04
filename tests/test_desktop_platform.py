@@ -4,7 +4,7 @@ import json
 import pytest
 
 from src.platform.base import Platform
-from src.platform.desktop import LEGACY_CONFIG_NAME, DesktopPlatform
+from src.platform.desktop import DesktopPlatform
 
 DEFAULTS = {"api_key": "", "players": []}
 SAMPLE = {
@@ -59,32 +59,6 @@ def test_load_non_dict_returns_defaults(platform, config_path):
     config_path.write_text("[1, 2]", encoding="utf-8")
     assert load(platform) == DEFAULTS
 
-
-def test_fallback_to_legacy_file(platform, config_path):
-    legacy = config_path.with_name(LEGACY_CONFIG_NAME)
-    legacy.write_text(json.dumps(SAMPLE), encoding="utf-8")
-    assert load(platform) == SAMPLE
-    assert not config_path.exists()
-
-
-def test_new_file_wins_over_legacy(platform, config_path):
-    config_path.with_name(LEGACY_CONFIG_NAME).write_text(json.dumps(SAMPLE), encoding="utf-8")
-    config_path.write_text(json.dumps({"api_key": "new", "players": []}), encoding="utf-8")
-    assert load(platform) == {"api_key": "new", "players": []}
-
-
-def test_save_writes_new_name_and_keeps_legacy(platform, config_path):
-    legacy = config_path.with_name(LEGACY_CONFIG_NAME)
-    legacy_text = json.dumps(SAMPLE)
-    legacy.write_text(legacy_text, encoding="utf-8")
-
-    config = load(platform)
-    config["api_key"] = "changed"
-    save(platform, config)
-
-    assert json.loads(config_path.read_text(encoding="utf-8"))["api_key"] == "changed"
-    assert legacy.read_text(encoding="utf-8") == legacy_text
-    assert load(platform)["api_key"] == "changed"
 
 
 def test_save_error_is_reported_not_raised(tmp_path, capsys):
@@ -182,3 +156,12 @@ def test_copy_props_without_on_done(platform, monkeypatch):
 
 def test_copy_props_empty_text(platform):
     assert platform.copy_props("") == {}
+
+
+def test_desktop_wording_attributes(platform):
+    assert platform.api_key_warning_extra == ""
+    assert platform.squad_backup_note == ""
+    assert platform.import_hint == (
+        "Paste a squad code (SSF1:...) or the contents of a config file "
+        "(steam_friends_game_finder_config.json)"
+    )

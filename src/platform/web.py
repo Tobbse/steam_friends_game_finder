@@ -25,7 +25,6 @@ from urllib.parse import quote, urlsplit
 
 import flet as ft
 
-from src.core.squad_code import sanitize_player_entries
 from src.platform.base import ConfigLoadError
 
 STORAGE_KEY = "steam_squad_finder.config.v1"  # Key inside the user's browser localStorage
@@ -77,6 +76,14 @@ class WebPlatform:
 
     name = "web"
     storage_description = "in this browser's local storage (not on the server)"
+    api_key_warning_extra = (
+        "It is sent to the app server only to make Steam requests. Don't use this on shared computers."
+    )
+    squad_backup_note = "Discord may occasionally clear Activity storage, so keep a squad code handy."
+    import_hint = (
+        "Paste a squad code (SSF1:...) or the contents of the desktop app's config file "
+        "(steam_friends_game_finder_config.json)"
+    )
 
     def __init__(
         self,
@@ -91,7 +98,9 @@ class WebPlatform:
         self.proxy_images = proxy_images
         self._storage = storage if storage is not None else ft.SharedPreferences()
         self._clipboard = clipboard if clipboard is not None else ft.Clipboard()
-        self._url_launcher = url_launcher if url_launcher is not None else ft.UrlLauncher()
+        # Created on the first open_url (inside the session's task, so it registers with this page).
+        # The UI opens links with link_props, so most sessions never need a launcher service.
+        self._url_launcher = url_launcher
 
     def open_url(self, url: str) -> None:
         """Opens `url` on the USER'S device (browser tab or Discord client), not on the server.
@@ -104,6 +113,8 @@ class WebPlatform:
 
     async def _launch_url(self, url: str) -> None:
         try:
+            if self._url_launcher is None:
+                self._url_launcher = ft.UrlLauncher()
             await self._url_launcher.launch_url(url)
         except Exception as err:
             print(f"Warning: Could not open URL: {err}")
@@ -160,7 +171,9 @@ class WebPlatform:
             return config
         if isinstance(loaded, dict):
             config["api_key"] = str(loaded.get("api_key", "") or "").strip()
-            config["players"] = sanitize_player_entries(loaded.get("players", []))
+            # Returned as stored, like the desktop platform; build_app sanitizes on both platforms.
+            if isinstance(loaded.get("players"), list):
+                config["players"] = loaded["players"]
         return config
 
     async def save_config(self, config: dict) -> None:

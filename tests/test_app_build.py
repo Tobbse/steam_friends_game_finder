@@ -479,3 +479,71 @@ def test_copy_button_enabled_for_game_with_blank_title(page, tmp_path, monkeypat
         _cancel_leftovers()
 
     asyncio.run(run())
+
+
+HELP_BASE = (
+    "How Adding Players Works:\n"
+    "• Accepted inputs:\n"
+    "  1. 17-digit SteamID64 (e.g. 76561197960287930)\n"
+    "  2. Full Steam Profile URL (steamcommunity.com/id/... or /profiles/...)\n"
+    "  3. Custom Vanity URL Name (e.g. gabelogannewell)\n"
+    "• Privacy requirement: Each player's Steam Profile AND 'Game details' privacy setting must be set to Public.\n"
+)
+EXPECTED_TEXTS = {
+    "desktop": {
+        "warning": "Warning: Your API key is stored in plain text on disk in c.json.",
+        "help": HELP_BASE
+        + "• Storage: Your player list is saved on disk in c.json.\n"
+        "• Backup/share: Use 'Export Squad' / 'Import Squad' below the player list.",
+        "hint": "Paste a squad code (SSF1:...) or the contents of a config file "
+        "(c.json)",
+    },
+    "web": {
+        "warning": "Warning: Your API key is stored in plain text in this browser's local storage (not on the server)."
+        " It is sent to the app server only to make Steam requests. Don't use this on shared computers.",
+        "help": HELP_BASE
+        + "• Storage: Your player list is saved in this browser's local storage (not on the server).\n"
+        "• Backup/share: Use 'Export Squad' / 'Import Squad' below the player list."
+        " Discord may occasionally clear Activity storage, so keep a squad code handy.",
+        "hint": "Paste a squad code (SSF1:...) or the contents of the desktop app's config file "
+        "(steam_friends_game_finder_config.json)",
+    },
+}
+
+
+class OpenStorage(GatedStorage):
+    def __init__(self, data):
+        super().__init__(data)
+        self.gate.set()
+
+
+@pytest.mark.parametrize("name", ["desktop", "web"])
+def test_ui_wording_per_platform(page, tmp_path, name):
+    async def run():
+        if name == "desktop":
+            platform = DesktopPlatform(page, config_path=tmp_path / "c.json")
+        else:
+            platform = WebPlatform(page, storage=OpenStorage({}), clipboard=NullClipboard(), url_launcher=object())
+        await app_mod.build_app(page, platform)
+        tooltips = [c.tooltip for c in walk(left_panel(page)) if isinstance(c, ft.Container) and isinstance(c.tooltip, str)]
+        expected = EXPECTED_TEXTS[name]
+        assert expected["warning"] in tooltips
+        assert expected["help"] in tooltips
+        find_button(left_panel(page), "Import Squad").on_click(None)
+        hint = next(c for c in walk(page.dialogs[-1]) if isinstance(c, ft.TextField)).hint_text
+        assert hint == expected["hint"]
+        _cancel_leftovers()
+
+    asyncio.run(run())
+
+
+def test_web_load_sanitizes_players_in_build_app(page):
+    async def run():
+        raw = {"api_key": "", "players": SEED["players"] + [{"steam_id": "bad"}, SEED["players"][0]]}
+        storage = OpenStorage({STORAGE_KEY: json.dumps(raw)})
+        await app_mod.build_app(page, WebPlatform(page, storage=storage, clipboard=NullClipboard(), url_launcher=object()))
+        texts = [c.value for c in walk(left_panel(page)) if isinstance(c, ft.Text)]
+        assert "Selected Players (1)" in texts
+        _cancel_leftovers()
+
+    asyncio.run(run())

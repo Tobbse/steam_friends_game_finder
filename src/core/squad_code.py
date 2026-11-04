@@ -70,7 +70,7 @@ def encode_squad_code(players: List[dict]) -> str:
 
 def decode_squad_code(text: str) -> List[dict]:
     """
-    Decodes a squad code OR raw JSON (e.g. the contents of the old steam_finder_config.json).
+    Decodes a squad code OR raw JSON (e.g. the contents of the desktop config file steam_friends_game_finder_config.json).
     Returns the sanitized player list. Any ``api_key`` in the input is ignored.
     Raises ValueError on invalid input.
     """

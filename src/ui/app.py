@@ -56,6 +56,11 @@ from src.ui.widgets import (
 )
 
 
+def _join_sentences(*parts: str) -> str:
+    """Joins the non-empty text parts with single spaces."""
+    return " ".join(p for p in parts if p)
+
+
 class LatestSnapshotWriter:
     """Serializes config writes so the newest snapshot is always the one written last.
 
@@ -94,15 +99,8 @@ async def build_app(page: ft.Page, platform: Platform):
     configure_always_visible_scrollbars(page)
 
     # Default window dimensions: 1330 x 960 (ignored when running in a browser)
-    try:
-        page.window.width = 1330
-        page.window.height = 960
-    except Exception:
-        try:
-            page.window_width = 1330
-            page.window_height = 960
-        except Exception:
-            pass
+    page.window.width = 1330
+    page.window.height = 960
 
     # State flags
     is_fetching: bool = False
@@ -136,11 +134,7 @@ async def build_app(page: ft.Page, platform: Platform):
             controls=[top_toast_card],
         ),
     )
-    if hasattr(page, "overlay"):
-        try:
-            page.overlay.append(top_toast_wrapper)
-        except Exception:
-            pass
+    page.overlay.append(top_toast_wrapper)
 
     def notify(msg: str):
         """Displays a slightly blue popup banner at the very top of the window."""
@@ -150,11 +144,8 @@ async def build_app(page: ft.Page, platform: Platform):
 
         top_toast_text.value = msg
         top_toast_wrapper.visible = True
-        if hasattr(page, "overlay") and top_toast_wrapper not in page.overlay:
-            try:
-                page.overlay.append(top_toast_wrapper)
-            except Exception:
-                pass
+        if top_toast_wrapper not in page.overlay:
+            page.overlay.append(top_toast_wrapper)
         page.update()
 
         async def _hide_toast():
@@ -167,58 +158,13 @@ async def build_app(page: ft.Page, platform: Platform):
 
         notify_clear_task = asyncio.create_task(_hide_toast())
 
-    # Safe multi-tier dialog display helpers (Flet 1.0 + Flet 0.2x compatible)
+    # Dialog helpers (Flet 1.0 dialog stack)
     def open_dialog(dlg: ft.AlertDialog):
-        dlg.open = True
-        if hasattr(page, "show_dialog"):
-            try:
-                page.show_dialog(dlg)
-                return
-            except Exception:
-                pass
-        if hasattr(page, "open"):
-            try:
-                page.open(dlg)
-                return
-            except Exception:
-                pass
-        if hasattr(page, "overlay"):
-            try:
-                if dlg not in page.overlay:
-                    page.overlay.append(dlg)
-                dlg.open = True
-                page.update()
-                return
-            except Exception:
-                pass
-        try:
-            page.dialog = dlg
-            dlg.open = True
-            page.update()
-        except Exception:
-            pass
+        page.show_dialog(dlg)
 
     def close_dialog(dlg: ft.AlertDialog):
         dlg.open = False
-        if hasattr(page, "pop_dialog"):
-            try:
-                page.pop_dialog()
-                return
-            except Exception:
-                pass
-        if hasattr(page, "close"):
-            try:
-                page.close(dlg)
-                return
-            except Exception:
-                pass
-        try:
-            dlg.open = False
-            if hasattr(page, "overlay") and dlg in page.overlay:
-                page.overlay.remove(dlg)
-            page.update()
-        except Exception:
-            pass
+        page.pop_dialog()
 
     def show_dialog(title: str, message: str):
         dlg = ft.AlertDialog(
@@ -487,13 +433,9 @@ async def build_app(page: ft.Page, platform: Platform):
             color=get_color("orange400"),
             size=20,
         ),
-        tooltip=(
-            f"Warning: Your API key is stored in plain text {platform.storage_description}."
-            + (
-                " It is sent to the app server only to make Steam requests. Don't use this on shared computers."
-                if platform.name == "web"
-                else ""
-            )
+        tooltip=_join_sentences(
+            f"Warning: Your API key is stored in plain text {platform.storage_description}.",
+            platform.api_key_warning_extra,
         ),
         padding=get_padding_symmetric(horizontal=2, vertical=2),
     )
@@ -532,11 +474,9 @@ async def build_app(page: ft.Page, platform: Platform):
         "  3. Custom Vanity URL Name (e.g. gabelogannewell)\n"
         "• Privacy requirement: Each player's Steam Profile AND 'Game details' privacy setting must be set to Public.\n"
         f"• Storage: Your player list is saved {platform.storage_description}.\n"
-        "• Backup/share: Use 'Export Squad' / 'Import Squad' below the player list."
-        + (
-            " Discord may occasionally clear Activity storage, so keep a squad code handy."
-            if platform.name == "web"
-            else ""
+        + _join_sentences(
+            "• Backup/share: Use 'Export Squad' / 'Import Squad' below the player list.",
+            platform.squad_backup_note,
         )
     )
 
@@ -1079,17 +1019,9 @@ async def build_app(page: ft.Page, platform: Platform):
         )
         open_dialog(dlg)
 
-    import_hint = (
-        "Paste a squad code (SSF1:...) or the contents of a config file "
-        "(steam_friends_game_finder_config.json or the older steam_finder_config.json)"
-        if platform.name == "desktop"
-        else "Paste a squad code (SSF1:...) or the contents of the desktop app's config file "
-        "(steam_friends_game_finder_config.json)"
-    )
-
     def open_import_dialog(e=None):
         input_field = ft.TextField(
-            hint_text=import_hint,
+            hint_text=platform.import_hint,
             multiline=True,
             min_lines=3,
             max_lines=8,
