@@ -4,6 +4,7 @@ Inside a Discord Activity the browser can only reach this server, so Steam image
 Discord SDK are fetched here and served from the same origin.
 """
 from collections import OrderedDict
+from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import quote
 
@@ -13,6 +14,9 @@ from fastapi import FastAPI, Response
 
 from src.platform.web import STEAM_IMAGE_PROXY_PATH, WebPlatform, is_allowed_image_host
 from src.ui.app import build_app
+
+# favicon.png and icons/loading-animation.png here replace Flet's defaults
+ASSETS_DIR = Path(__file__).resolve().parents[2] / "assets"
 
 IMAGE_CACHE_MAX_BYTES = 48 * 1024 * 1024
 IMAGE_MAX_BYTES = 3 * 1024 * 1024
@@ -172,7 +176,7 @@ def build_asgi_app():
         await build_app(page, WebPlatform())
 
     # no_cdn: Discord's sandbox blocks external CDNs, so Flet serves its own assets
-    flet_app = InjectHandshake(ft.run(session, export_asgi_app=True, no_cdn=True))
+    flet_app = InjectHandshake(ft.run(session, export_asgi_app=True, no_cdn=True, assets_dir=str(ASSETS_DIR)))
     helper_paths = (STEAM_IMAGE_PROXY_PATH, DISCORD_HANDSHAKE_PATH, DISCORD_SDK_PATH)
 
     async def app(scope, receive, send):
