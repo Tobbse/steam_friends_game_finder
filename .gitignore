@@ -1,10 +1,13 @@
 steam_friends_game_finder_config.json
 __pycache__/
+.pytest_cache/
 build
 dist
 *.spec
 .idea
 .venv
 venv
+myenv
 .claude
 .serena
+.DS_Store

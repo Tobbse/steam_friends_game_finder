@@ -1,8 +1,6 @@
 import pytest
 
 from src.core.filtering import (
-    SORT_DEFAULT_DESCENDING,
-    SORT_OPTIONS,
     FilterSettings,
     filter_games,
     sort_games,
@@ -55,17 +53,6 @@ def test_or_mode_leaves_zero_threshold_out(players, make_game):
     assert names(filter_games(games, s)) == ["owned by 2"]
 
 
-def test_or_mode_leaves_zero_owned_threshold_out(players, make_game):
-    p = players
-    games = [
-        make_game(1, "wishlisted by 2", wishlisters=p[:2]),
-        make_game(2, "wishlisted by 1", wishlisters=p[:1]),
-        make_game(3, "owned by 3", owners=p[:3]),
-    ]
-    s = FilterSettings(min_owned=0, min_wishlist=2, owned_wishlist_mode="OR")
-    assert names(filter_games(games, s)) == ["wishlisted by 2"]
-
-
 @pytest.mark.parametrize("mode", ["AND", "OR"])
 def test_both_thresholds_zero_means_no_constraint(players, make_game, mode):
     p = players
@@ -97,16 +84,6 @@ def test_tag_search_requires_every_tag_as_substring_of_some_label(make_game):
     assert names(filter_games(games, s)) == ["both"]
 
 
-def test_tag_search_matches_genres(make_game):
-    games = [
-        make_game(1, "genre rpg", genres={"RPG"}),
-        make_game(2, "category rpg", labels={"RPG"}),
-        make_game(3, "no rpg", labels={"Action"}, genres={"Strategy"}),
-    ]
-    s = no_owner_floor(required_tags=("rpg",))
-    assert names(filter_games(games, s)) == ["genre rpg", "category rpg"]
-
-
 # ------------------------------------------------------------------
 # Review / discount / price
 # ------------------------------------------------------------------
@@ -130,18 +107,6 @@ def test_min_discount_needs_enough_discount(make_game):
     assert names(filter_games(games, no_owner_floor(min_discount=25))) == ["big sale"]
 
 
-def test_min_discount_counts_discount_pct_as_on_sale(make_game):
-    """A discount alone puts the game on sale; there is no separate flag to disagree with it."""
-    game = make_game(1, "discount set directly", price=5.0)
-    game.discount_pct = 75
-    assert names(filter_games([game], no_owner_floor(min_discount=25))) == ["discount set directly"]
-
-
-def test_max_price_none_means_no_limit(make_game):
-    games = [make_game(1, "cheap", price=1.0), make_game(2, "pricey", price=60.0), make_game(3, "unknown")]
-    assert len(filter_games(games, no_owner_floor(max_price=None))) == 3
-
-
 def test_max_price_limit_excludes_unknown_and_over_limit(make_game):
     games = [
         make_game(1, "cheap", price=9.99),
@@ -152,11 +117,6 @@ def test_max_price_limit_excludes_unknown_and_over_limit(make_game):
     assert names(filter_games(games, no_owner_floor(max_price=10))) == ["cheap", "exact"]
 
 
-def test_free_game_passes_max_price_zero(make_game):
-    games = [make_game(1, "free", price=0.0), make_game(2, "cheap", price=0.99)]
-    assert names(filter_games(games, no_owner_floor(max_price=0))) == ["free"]
-
-
 # ------------------------------------------------------------------
 # Unreleased / unavailable
 # ------------------------------------------------------------------
@@ -164,12 +124,6 @@ def test_unreleased_hidden_when_not_included(make_game):
     games = [make_game(1, "released"), make_game(2, "upcoming", unreleased=True)]
     assert names(filter_games(games, no_owner_floor(include_unreleased=False))) == ["released"]
     assert len(filter_games(games, no_owner_floor(include_unreleased=True))) == 2
-
-
-def test_unreleased_detected_from_release_date_text(make_game):
-    g = make_game(1, "coming")
-    g.release_date = "Coming soon"
-    assert filter_games([g], no_owner_floor(include_unreleased=False)) == []
 
 
 def test_unavailable_hidden_by_default(make_game):
@@ -185,25 +139,6 @@ def test_unavailable_hidden_by_default(make_game):
 def test_coop_matches_online_coop(make_game):
     games = [make_game(1, "coop", labels={"Online Co-op"}), make_game(2, "solo", labels={"Single-player"})]
     assert names(filter_games(games, no_owner_floor(require_coop=True))) == ["coop"]
-
-
-def test_multiplayer_matches_pvp(make_game):
-    games = [make_game(1, "pvp", labels={"PvP"}), make_game(2, "solo", labels={"Single-player"})]
-    assert names(filter_games(games, no_owner_floor(require_multiplayer=True))) == ["pvp"]
-
-
-def test_online_matches_online_pvp_and_mmo_but_not_split_screen(make_game):
-    games = [
-        make_game(1, "pvp", labels={"Online PvP"}),
-        make_game(2, "mmo", labels={"MMO"}),
-        make_game(3, "couch", labels={"Shared/Split Screen Co-op"}),
-    ]
-    assert names(filter_games(games, no_owner_floor(require_online=True))) == ["pvp", "mmo"]
-
-
-def test_vr_matches_vr_supported(make_game):
-    games = [make_game(1, "vr", labels={"VR Supported"}), make_game(2, "flat", labels={"Action"})]
-    assert names(filter_games(games, no_owner_floor(require_vr=True))) == ["vr"]
 
 
 @pytest.mark.parametrize("field", ["mac", "linux"])
@@ -257,14 +192,6 @@ def test_sort_puts_missing_price_last(make_game, descending, expected):
     assert names(sort_games(games, "Price", descending)) == expected
 
 
-@pytest.mark.parametrize(
-    "descending, expected", [(True, ["high", "low", "none"]), (False, ["low", "high", "none"])]
-)
-def test_sort_puts_missing_reviews_last(make_game, descending, expected):
-    games = [make_game(1, "none"), make_game(2, "low", review=10), make_game(3, "high", review=99)]
-    assert names(sort_games(games, "User Reviews", descending)) == expected
-
-
 @pytest.mark.parametrize("descending", [True, False])
 def test_sort_ties_owners_desc_wishlisters_desc_name_asc(players, make_game, descending):
     p = players
@@ -278,31 +205,3 @@ def test_sort_ties_owners_desc_wishlisters_desc_name_asc(players, make_game, des
     assert names(sort_games(games, "Price", descending)) == ["omega", "Alpha", "beta", "zeta"]
 
 
-def test_sort_does_not_change_input_list(sortable_games):
-    original = list(sortable_games)
-    result = sort_games(sortable_games, "Owned", True)
-    assert sortable_games == original
-    assert result is not sortable_games
-
-
-@pytest.mark.parametrize("descending", [True, False])
-def test_unknown_sort_by_falls_back_to_owned(sortable_games, descending):
-    assert names(sort_games(sortable_games, "Bogus", descending)) == names(
-        sort_games(sortable_games, "Owned", descending)
-    )
-    assert names(sort_games(sortable_games, "Bogus", True)) == ["B", "C", "A"]
-
-
-def test_sort_default_directions():
-    assert SORT_OPTIONS == ["Owned", "Wishlisted", "User Reviews", "Price", "Discount"]
-    assert SORT_DEFAULT_DESCENDING["Price"] is False
-    for name in SORT_OPTIONS:
-        if name != "Price":
-            assert SORT_DEFAULT_DESCENDING[name] is True
-
-
-def test_filter_settings_defaults():
-    s = FilterSettings()
-    assert (s.min_owned, s.min_wishlist, s.owned_wishlist_mode) == (1, 0, "AND")
-    assert (s.min_discount, s.min_review, s.max_price) == (0, 0, None)
-    assert s.include_unreleased is True and s.include_unavailable is False

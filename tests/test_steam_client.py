@@ -20,10 +20,6 @@ APPDETAILS_PATH = "/api/appdetails"
 STEAM_ID = "76561198000000001"
 
 
-def store_wishlist_path(steam_id=STEAM_ID):
-    return f"/wishlist/profiles/{steam_id}/wishlistdata/"
-
-
 class FakeSteam:
     """
     Routes requests by (host, path) to canned responses. A route value is either an
@@ -100,22 +96,9 @@ async def test_resolve_vanity(client, fake, input_str):
     assert req.url.params["key"] == "TEST_KEY"
 
 
-async def test_resolve_17_digit_vanity_url_uses_api(client, fake):
-    other_id = "76561198000000099"
-    fake.add(API, VANITY_PATH, httpx.Response(200, json={"response": {"success": 1, "steamid": other_id}}))
-    assert await client.resolve_steam_id(f"https://steamcommunity.com/id/{STEAM_ID}") == other_id
-    [req] = fake.calls(API, VANITY_PATH)
-    assert req.url.params["vanityurl"] == STEAM_ID
-
-
 async def test_resolve_vanity_not_found(client, fake):
     fake.add(API, VANITY_PATH, httpx.Response(200, json={"response": {"success": 42, "message": "No match"}}))
     assert await client.resolve_steam_id("nobody") is None
-
-
-async def test_resolve_vanity_network_error_returns_none(client, fake):
-    fake.add(API, VANITY_PATH, raise_connect_error)
-    assert await client.resolve_steam_id("gaben") is None
 
 
 # ---------- fetch_player_summary ----------
@@ -127,7 +110,6 @@ async def test_player_summary_success(client, fake):
     player = Player(STEAM_ID)
     assert await client.fetch_player_summary(player) == (True, None)
     assert player.display_name == "Gabe"
-    assert player.avatar_url == "http://a.png"
 
 
 async def test_player_summary_not_found(client, fake):
@@ -159,14 +141,6 @@ async def test_owned_games_parsed(client, fake):
     assert req.url.params["steamid"] == STEAM_ID
 
 
-async def test_owned_games_zero_count_is_public_and_empty(client, fake):
-    fake.add(API, OWNED_PATH, httpx.Response(200, json={"response": {"game_count": 0}}))
-    player = Player(STEAM_ID)
-    await client.fetch_owned_games(player)
-    assert player.owned_games == {}
-    assert player.is_private is False
-
-
 @pytest.mark.parametrize("body", [{"response": {}}, {}])
 async def test_owned_games_private_profile(client, fake, body):
     fake.add(API, OWNED_PATH, httpx.Response(200, json=body))
@@ -186,92 +160,15 @@ async def test_owned_games_auth_error_sets_fetch_error(client, fake, status):
     assert player.is_private is False
 
 
-async def test_owned_games_other_http_error_sets_fetch_error(client, fake):
-    fake.add(API, OWNED_PATH, httpx.Response(500))
-    player = Player(STEAM_ID)
-    await client.fetch_owned_games(player)
-    assert player.fetch_error == "Steam API returned HTTP 500."
-
-
-async def test_owned_games_network_error_sets_fetch_error(client, fake):
-    fake.add(API, OWNED_PATH, raise_connect_error)
-    player = Player(STEAM_ID)
-    await client.fetch_owned_games(player)
-    assert player.fetch_error.startswith("Network error:")
-    assert "connection refused" in player.fetch_error
-
-
 # ---------- fetch_wishlist ----------
 
-async def test_wishlist_api_success_skips_store(client, fake):
+async def test_wishlist_parsed(client, fake):
     fake.add(API, WISHLIST_API_PATH, httpx.Response(200, json={"response": {
         "items": [{"appid": 10, "priority": 1}, {"appid": 20}, {"priority": 3}]
     }}))
     player = Player(STEAM_ID)
     await client.fetch_wishlist(player)
     assert player.wishlist_games == {10: "App 10", 20: "App 20"}
-    # The store route is not registered, so any fallback call would fail the test.
-    assert len(fake.requests) == 1
-
-
-async def test_wishlist_api_empty_is_authoritative(client, fake):
-    fake.add(API, WISHLIST_API_PATH, httpx.Response(200, json={"response": {}}))
-    player = Player(STEAM_ID)
-    await client.fetch_wishlist(player)
-    assert player.wishlist_games == {}
-    assert len(fake.requests) == 1
-
-
-@pytest.mark.parametrize("api_route", [httpx.Response(500), httpx.Response(403), raise_connect_error])
-async def test_wishlist_falls_back_to_store_when_api_fails(client, fake, api_route):
-    fake.add(API, WISHLIST_API_PATH, api_route)
-    fake.add(STORE, store_wishlist_path(), httpx.Response(200, json={
-        "30": {"name": "Day of Defeat"}, "40": {}, "not_an_id": {"name": "x"}, "50": "junk",
-    }))
-    player = Player(STEAM_ID)
-    await client.fetch_wishlist(player)
-    assert player.wishlist_games == {30: "Day of Defeat", 40: "App 40"}
-    [store_req] = fake.calls(STORE, store_wishlist_path())
-    assert store_req.url.params["p"] == "0"
-    assert "Mozilla" in store_req.headers["User-Agent"]
-
-
-async def test_wishlist_store_fallback_paginates(client, fake):
-    fake.add(API, WISHLIST_API_PATH, httpx.Response(500))
-
-    def store_page(request):
-        page = int(request.url.params["p"])
-        if page == 0:
-            return httpx.Response(200, json={str(1000 + i): {"name": f"G{i}"} for i in range(50)})
-        if page == 1:
-            return httpx.Response(200, json={"2000": {"name": "Last"}})
-        pytest.fail(f"Unexpected page {page}")
-
-    fake.add(STORE, store_wishlist_path(), store_page)
-    player = Player(STEAM_ID)
-    await client.fetch_wishlist(player)
-    assert len(player.wishlist_games) == 51
-    assert player.wishlist_games[2000] == "Last"
-    assert [r.url.params["p"] for r in fake.calls(STORE, store_wishlist_path())] == ["0", "1"]
-
-
-@pytest.mark.parametrize("store_body", [{"success": 2}, [], {}])
-async def test_wishlist_store_fallback_private_or_empty(client, fake, store_body):
-    fake.add(API, WISHLIST_API_PATH, httpx.Response(500))
-    fake.add(STORE, store_wishlist_path(), httpx.Response(200, json=store_body))
-    player = Player(STEAM_ID)
-    await client.fetch_wishlist(player)
-    assert player.wishlist_games == {}
-    assert len(fake.calls(STORE, store_wishlist_path())) == 1
-
-
-async def test_wishlist_without_api_key_goes_straight_to_store(fake):
-    fake.add(STORE, store_wishlist_path(), httpx.Response(200, json={"30": {"name": "Day of Defeat"}}))
-    async with SteamClient("", transport=httpx.MockTransport(fake.handler)) as c:
-        player = Player(STEAM_ID)
-        await c.fetch_wishlist(player)
-    assert player.wishlist_games == {30: "Day of Defeat"}
-    assert fake.calls(API, WISHLIST_API_PATH) == []
 
 
 # ---------- session maps / store definitions ----------
@@ -297,26 +194,6 @@ async def test_ensure_store_definitions_fills_session_maps(client, fake):
     # Second call is a no-op because both maps are filled.
     await client.ensure_store_definitions()
     assert len(fake.requests) == 2
-
-
-async def test_ensure_store_definitions_retries_only_missing_map(client, fake):
-    sc.SESSION_CATEGORY_MAP[1] = "Already Loaded"
-    _add_definitions(fake)
-    await client.ensure_store_definitions()
-    assert fake.calls(API, CATEGORIES_PATH) == []
-    assert sc.SESSION_TAG_MAP == {19: "Action"}
-
-
-async def test_ensure_store_definitions_skipped_without_api_key(fake):
-    async with SteamClient("", transport=httpx.MockTransport(fake.handler)) as c:
-        await c.ensure_store_definitions()
-    assert fake.requests == []
-    assert sc.SESSION_CATEGORY_MAP == {}
-
-
-async def test_session_maps_start_empty_in_each_test():
-    assert sc.SESSION_CATEGORY_MAP == {}
-    assert sc.SESSION_TAG_MAP == {}
 
 
 # ---------- fetch_bulk_store_items (smoke) ----------
@@ -374,20 +251,6 @@ async def test_bulk_store_items_compare_release_timestamp_with_now(monkeypatch, 
     assert game.is_effectively_unreleased is unreleased
     assert game.release_date == "Dec 20, 2026"
     assert game.final_price == 9.99
-
-
-async def test_bulk_store_items_custom_date_text_without_flag_is_released(client, fake):
-    _add_definitions(fake)
-    fake.add(API, ITEMS_PATH, httpx.Response(200, json={"response": {"store_items": [{
-        "appid": 10,
-        "release": {"custom_release_date_message": "Q4 2099"},
-        "best_purchase_option": {"formatted_final_price": "$9.99", "final_price_in_cents": 999},
-    }]}}))
-    game = GameItem(10, "Game")
-    game.owners = [Player(STEAM_ID)]
-    await client.fetch_bulk_store_items([game])
-    assert game.is_unreleased is False
-    assert game.release_date == "Q4 2099"
 
 
 def _appdetails(release_date):

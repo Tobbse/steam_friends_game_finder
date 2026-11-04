@@ -13,21 +13,18 @@ from src.core.pricing import (
     parse_price_string,
 )
 
-# Dynamic in-memory maps populated from Steam's Web API
+# Steam category/tag id -> name, fetched once per process
 SESSION_CATEGORY_MAP: Dict[int, str] = {}
 SESSION_TAG_MAP: Dict[int, str] = {}
 
 
-# ==========================================
-# ASYNC STEAM API CLIENT (BULK & RATE-SAFE)
-# ==========================================
 class SteamClient:
     def __init__(self, api_key: str, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.api_key = api_key
         limits = httpx.Limits(max_connections=20, max_keepalive_connections=15)
         self.client = httpx.AsyncClient(timeout=15.0, limits=limits, transport=transport)
-        self._api_semaphore = asyncio.Semaphore(6)    # Official Web API concurrency
-        self._store_semaphore = asyncio.Semaphore(2)  # Gentle throttle for store.steampowered.com
+        self._api_semaphore = asyncio.Semaphore(6)
+        self._store_semaphore = asyncio.Semaphore(2)  # store.steampowered.com rate-limits harder
 
     async def __aenter__(self):
         return self
@@ -39,13 +36,7 @@ class SteamClient:
         await self.client.aclose()
 
     async def ensure_store_definitions(self):
-        """
-        Dynamically fetches Steam's official Category ID and Tag ID definitions.
-        Automatically retries on subsequent calls if either map failed to populate.
-        """
-        if not self.api_key:
-            return
-
+        """Fetches the category and tag names. Retries on the next call if a fetch failed."""
         async def _fetch_categories():
             if SESSION_CATEGORY_MAP:
                 return
@@ -85,17 +76,15 @@ class SteamClient:
     async def resolve_steam_id(self, input_str: str) -> Optional[str]:
         input_str = input_str.strip()
 
-        # 1. Explicit /profiles/<17-digit SteamID64> URL
         match_profile_url = re.search(r"steamcommunity\.com/profiles/(\d{17})", input_str)
         if match_profile_url:
             return match_profile_url.group(1)
 
-        # 2. Explicit /id/<vanity> URL (checked before generic 17-digit regex in case vanity is 17 digits)
+        # /id/<vanity> before the bare 17-digit check: a vanity name can be 17 digits
         match_vanity = re.search(r"steamcommunity\.com/id/([^/?#]+)", input_str)
         if match_vanity:
             vanity_name = match_vanity.group(1)
         else:
-            # 3. Raw 17-digit SteamID64
             match_id64 = re.search(r"\b(\d{17})\b", input_str)
             if match_id64:
                 return match_id64.group(1)
@@ -128,7 +117,6 @@ class SteamClient:
             players = resp.json().get("response", {}).get("players", [])
             if players:
                 player.display_name = players[0].get("personaname", player.steam_id)
-                player.avatar_url = players[0].get("avatarmedium", "")
                 return True, None
             return False, None
         except Exception as exc:
@@ -152,7 +140,7 @@ class SteamClient:
                 player.fetch_error = f"Steam API returned HTTP {resp.status_code}."
                 return
             data = resp.json().get("response", {})
-            # Steam returns an empty dict {} when 'Game details' are set to Private
+            # Private 'Game details' gives an empty response
             if "games" not in data and "game_count" not in data:
                 player.is_private = True
                 return
@@ -162,61 +150,23 @@ class SteamClient:
             player.fetch_error = f"Network error: {exc}"
 
     async def fetch_wishlist(self, player: Player):
-        # Method 1: Official Steam Web API (IWishlistService)
-        if self.api_key:
-            url_api = "https://api.steampowered.com/IWishlistService/GetWishlist/v1/"
-            params = {"key": self.api_key, "steamid": player.steam_id}
-            try:
-                async with self._api_semaphore:
-                    resp = await self.client.get(url_api, params=params)
-                if resp.status_code == 200:
-                    data = resp.json().get("response", {})
-                    items = data.get("items", [])
-                    for item in items:
-                        appid = item.get("appid")
-                        if appid:
-                            player.wishlist_games[int(appid)] = f"App {appid}"
-                    # Authoritative response from official API (even if wishlist is empty)
-                    return
-            except Exception:
-                pass
-
-        # Method 2: Fallback to Steam Store wishlistdata endpoint only if Web API failed
-        headers = {
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
-        }
-        for page_num in range(4):
-            url_store = f"https://store.steampowered.com/wishlist/profiles/{player.steam_id}/wishlistdata/"
-            try:
-                async with self._store_semaphore:
-                    resp = await self.client.get(url_store, params={"p": page_num}, headers=headers)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, dict) and "success" not in data and len(data) > 0:
-                        for appid_str, info in data.items():
-                            if isinstance(info, dict) and appid_str.isdigit():
-                                player.wishlist_games[int(appid_str)] = info.get("name", f"App {appid_str}")
-                        if len(data) < 50:
-                            break
-                    else:
-                        break
-                else:
-                    break
-            except Exception:
-                break
+        url = "https://api.steampowered.com/IWishlistService/GetWishlist/v1/"
+        try:
+            async with self._api_semaphore:
+                resp = await self.client.get(url, params={"key": self.api_key, "steamid": player.steam_id})
+            if resp.status_code == 200:
+                for item in resp.json().get("response", {}).get("items", []):
+                    if item.get("appid"):
+                        player.wishlist_games[int(item["appid"])] = f"App {item['appid']}"
+        except Exception:
+            pass
 
     async def fetch_bulk_store_items(
         self,
         games: List[GameItem],
         on_progress: Optional[Callable[[int, int], None]] = None,
     ):
-        """
-        Fetches prices, discounts, reviews, titles, platforms, descriptions, release/availability status,
-        categories, and tags in 150-game chunks using paced waves.
-        """
+        """Fetches store data (price, reviews, tags, release status, ...) in chunks of 150 games."""
         if not games:
             return
 
@@ -266,7 +216,6 @@ class SteamClient:
                             if item.get("name"):
                                 g.name = item["name"]
 
-                            # Extract Header Image Asset URL (supports newer hashed asset paths)
                             assets = item.get("assets") or {}
                             asset_fmt = assets.get("asset_url_format")
                             header_file = assets.get("header")
@@ -276,7 +225,6 @@ class SteamClient:
                                     f"https://shared.akamai.steamstatic.com/store_item_assets/{rel_path}"
                                 )
 
-                            # Dynamically resolve Store Categories
                             cats_obj = item.get("categories") or {}
                             for key in (
                                 "supported_player_categoryids",
@@ -290,7 +238,6 @@ class SteamClient:
                                         if cname:
                                             g.categories.add(cname)
 
-                            # Dynamically resolve Store Tags / Genres
                             tag_ids = item.get("tagids")
                             if isinstance(tag_ids, list):
                                 for tid in tag_ids:
@@ -298,14 +245,12 @@ class SteamClient:
                                     if tname:
                                         g.genres.add(tname)
 
-                            # Extract Basic Info (Short description & Developers)
                             basic = item.get("basic_info") or {}
                             if basic.get("short_description") and not g.short_description:
                                 g.short_description = re.sub(r"<[^>]+>", "", basic["short_description"]).strip()
                             if basic.get("developers") and not g.developers:
                                 g.developers = [d.get("name", "") for d in basic["developers"] if d.get("name")]
 
-                            # Extract User Reviews
                             reviews_obj = item.get("reviews") or {}
                             summary_filtered = (
                                 reviews_obj.get("summary_filtered")
@@ -318,7 +263,6 @@ class SteamClient:
                                 g.review_percentage = int(pct_pos)
                                 g.review_desc = str(summary_filtered.get("review_score_label") or "")
 
-                            # Extract Release Status & Unreleased Detection
                             coming_soon, rel_date_str = detect_unreleased_from_store_item(
                                 item, now_ts
                             )
@@ -326,7 +270,6 @@ class SteamClient:
                             if rel_date_str and not g.release_date:
                                 g.release_date = rel_date_str
 
-                            # Extract Platforms
                             platforms = item.get("platforms") or {}
                             if platforms:
                                 g.windows_supported = bool(platforms.get("windows", False))
@@ -335,7 +278,6 @@ class SteamClient:
                                     platforms.get("steamos_linux", False) or platforms.get("linux", False)
                                 )
 
-                            # Extract Pricing & Discounts (after applied discount)
                             bpo = item.get("best_purchase_option")
                             if bpo:
                                 formatted_price = str(bpo.get("formatted_final_price") or "").strip()
@@ -349,7 +291,7 @@ class SteamClient:
                                 else:
                                     parsed_price = parse_price_string(formatted_price)
 
-                                # Guard against unreleased games having a $0 placeholder purchase option
+                                # Unreleased games can have a $0 placeholder price
                                 if g.is_effectively_unreleased and (parsed_price is None or parsed_price == 0.0):
                                     g.price_str = ""
                                     g.final_price = None
@@ -366,8 +308,7 @@ class SteamClient:
                                 g.discount_pct = 0
                                 g.price_fetched = True
 
-                            # Secondary check: if a game is visible on the store, has no release date timestamp,
-                            # no price, no reviews, and is only wishlisted (0 owners), it is an upcoming/unreleased title
+                            # Listed, but no release date, price or reviews, and nobody owns it: treat as upcoming
                             rel_obj = item.get("release") or {}
                             if (
                                 not g.is_unreleased
@@ -382,7 +323,6 @@ class SteamClient:
                                 if not g.release_date:
                                     g.release_date = "Coming Soon"
 
-                            # Detect Unavailable / Delisted store status
                             is_delisted = (
                                 item.get("visible") is False
                                 or item.get("unlisted") is True
@@ -392,7 +332,7 @@ class SteamClient:
                             g.is_unavailable = bool(is_delisted and not g.is_effectively_unreleased)
                             g.store_info_fetched = True
 
-                        # Any requested appid completely omitted by Steam's store response is unavailable/removed
+                        # Apps missing from the response are delisted
                         for g in chunk:
                             if g.appid not in returned_appids:
                                 g.is_unavailable = not g.is_effectively_unreleased
@@ -400,7 +340,6 @@ class SteamClient:
                 except Exception:
                     pass
                 finally:
-                    # Ensure no game in the chunk remains stuck displaying "Fetching..." forever
                     for g in chunk:
                         if not g.store_info_fetched:
                             g.store_info_fetched = True
@@ -409,7 +348,7 @@ class SteamClient:
             if on_progress:
                 on_progress(min(completed, total), total)
 
-        # Paced wave execution (2 chunks per wave with a short pause between waves)
+        # 2 chunks at a time, with a short pause, to stay under Steam's rate limit
         wave_size = 2
         for w_idx in range(0, len(chunks), wave_size):
             wave = chunks[w_idx : w_idx + wave_size]
@@ -418,7 +357,7 @@ class SteamClient:
                 await asyncio.sleep(0.15)
 
     async def fetch_store_info(self, game: GameItem):
-        """On-demand single-game fallback (used when opening Game Details popup for an item missing details)."""
+        """Single-game fallback for the details dialog, from the store's appdetails endpoint."""
         if game.details_fetched or (game.store_info_fetched and game.short_description):
             return
 

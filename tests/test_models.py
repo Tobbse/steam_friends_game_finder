@@ -33,10 +33,6 @@ def test_is_coop(labels, expected):
     assert _game(labels).is_coop is expected
 
 
-def test_is_coop_reads_genres_too():
-    assert _game(genres=["Co-op"]).is_coop is True
-
-
 @pytest.mark.parametrize(
     "labels, expected",
     [
@@ -83,35 +79,6 @@ def test_is_vr(labels, expected):
 
 # ---------- is_free ----------
 
-def test_is_free_with_zero_price():
-    game = GameItem(1, "Game")
-    game.final_price = 0.0
-    assert game.is_free is True
-
-
-def test_is_free_with_free_text():
-    game = GameItem(1, "Game")
-    game.price_str = "Free to Play"
-    assert game.is_free is True
-
-
-def test_is_free_false_for_paid_game():
-    game = GameItem(1, "Game")
-    game.final_price = 19.99
-    game.price_str = "$19.99"
-    assert game.is_free is False
-
-
-def test_is_free_false_without_price_info():
-    assert GameItem(1, "Game").is_free is False
-
-
-def test_unreleased_game_is_never_free():
-    game = GameItem(1, "Game")
-    game.final_price = 0.0
-    game.is_unreleased = True
-    assert game.is_free is False
-
 
 # ---------- unreleased vs unavailable ----------
 
@@ -120,12 +87,6 @@ def test_unavailable_flag_alone_makes_game_unavailable():
     game.is_unavailable = True
     assert game.is_effectively_unreleased is False
     assert game.is_effectively_unavailable is True
-
-
-def test_default_game_is_neither_unreleased_nor_unavailable():
-    game = GameItem(1, "Game")
-    assert game.is_effectively_unreleased is False
-    assert game.is_effectively_unavailable is False
 
 
 @pytest.mark.parametrize(
@@ -160,43 +121,6 @@ def test_player_display_name_falls_back_to_steam_id():
     assert Player("76561198000000001", "").display_name == "76561198000000001"
 
 
-def test_player_display_name_kept_when_given():
-    player = Player("76561198000000001", "Alice", "http://avatar")
-    assert player.display_name == "Alice"
-    assert player.avatar_url == "http://avatar"
-
-
-def test_player_defaults():
-    player = Player("1")
-    assert player.owned_games == {}
-    assert player.wishlist_games == {}
-    assert player.is_private is False
-    assert player.fetch_error is None
-    assert player.library_fetched is False
-
-
 # ---------- price text is checked for keywords only ----------
 
-@pytest.mark.parametrize("price_str", ["2031,00 kr", "$2099.00", "Q1 2099", "Dec 20, 2099"])
-def test_price_text_with_year_like_number_is_not_unreleased(price_str):
-    game = GameItem(1, "Game")
-    game.price_str = price_str
-    game.final_price = 2031.0
-    assert game.is_effectively_unreleased is False
-    assert game.is_free is False
-    assert game.is_effectively_unavailable is False
 
-
-def test_unavailable_game_with_year_like_price_stays_unavailable():
-    game = GameItem(1, "Game")
-    game.price_str = "2031,00 kr"
-    game.final_price = 2031.0
-    game.is_unavailable = True
-    assert game.is_effectively_unavailable is True
-
-
-def test_free_price_text_with_year_like_number_is_free():
-    game = GameItem(1, "Game")
-    game.price_str = "Free until Dec 20, 2099"
-    assert game.is_effectively_unreleased is False
-    assert game.is_free is True

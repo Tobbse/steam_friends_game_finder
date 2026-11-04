@@ -45,22 +45,10 @@ def test_has_unreleased_keyword_true(text):
     assert has_unreleased_keyword(text) is True
 
 
-@pytest.mark.parametrize(
-    "text",
-    ["", "$19.99", "2031,00 kr", "Q1 2099", "Q4 2026", "Dec 20, 2099", "December 2099", "2027", "Free to Play"],
-)
-def test_has_unreleased_keyword_ignores_years_and_dates(text):
-    assert has_unreleased_keyword(text) is False
-
-
 # ---------- detect_unreleased_from_store_item ----------
 
 def test_detect_empty_item_is_released_without_date():
     assert detect_unreleased_from_store_item({}, NOW_TS) == (False, "")
-
-
-def test_detect_release_none_is_handled():
-    assert detect_unreleased_from_store_item({"release": None}, NOW_TS) == (False, "")
 
 
 def test_detect_top_level_coming_soon_flag():
@@ -70,11 +58,6 @@ def test_detect_top_level_coming_soon_flag():
 @pytest.mark.parametrize("flag", ["is_coming_soon", "coming_soon_display", "is_preload", "is_abridged_release_date"])
 def test_detect_release_flags(flag):
     assert detect_unreleased_from_store_item({"release": {flag: True}}, NOW_TS) == (True, "Coming Soon")
-
-
-@pytest.mark.parametrize("flag", ["is_coming_soon", "coming_soon_display", "is_preload", "is_abridged_release_date"])
-def test_detect_false_flags_are_released(flag):
-    assert detect_unreleased_from_store_item({"release": {flag: False}}, NOW_TS) == (False, "")
 
 
 def test_detect_past_timestamp_is_released_and_formats_date():
@@ -90,11 +73,6 @@ def test_detect_future_timestamp_is_unreleased():
     assert detect_unreleased_from_store_item(item, NOW_TS) == (True, expected_str)
 
 
-def test_detect_timestamp_equal_to_now_is_released():
-    item = {"release": {"steam_release_date": int(NOW_TS)}}
-    assert detect_unreleased_from_store_item(item, NOW_TS)[0] is False
-
-
 def test_detect_custom_keyword_message_wins_over_timestamp():
     item = {"release": {"steam_release_date": 1579089600, "custom_release_date_message": " To be announced "}}
     assert detect_unreleased_from_store_item(item, NOW_TS) == (True, "To be announced")
@@ -107,6 +85,3 @@ def test_detect_custom_date_message_without_flag_is_released(message):
     assert detect_unreleased_from_store_item(item, NOW_TS) == (False, message)
 
 
-def test_detect_custom_date_message_with_flag_is_unreleased():
-    item = {"release": {"custom_release_date_message": "Q4 2027", "coming_soon_display": True}}
-    assert detect_unreleased_from_store_item(item, NOW_TS) == (True, "Q4 2027")

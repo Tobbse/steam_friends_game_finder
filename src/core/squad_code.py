@@ -1,15 +1,4 @@
-"""Squad codes: share a player list as a compact, copy-pasteable string.
-
-Copied from the ``web`` branch (steam_friends_game_finder.py). Changes from ``web``:
-
-- ``sanitize_player_entries`` accepts ASCII digits only in Steam IDs.
-- ``sanitize_player_entries`` caps at 500 valid players, not 500 raw input entries.
-- ``decode_squad_code`` returns only the player list. It never reads or returns an
-  API key; the key is always typed in by the user. A config-shaped dict is still
-  accepted, but only its ``players`` list is used.
-- ``decode_squad_code`` raises ValueError for input that is not a str (or None),
-  and for input longer than 1,000,000 characters before doing any other work.
-"""
+"""Squad codes: a player list as a short, copy-pasteable string. Never contains the API key."""
 import base64
 import json
 import re
@@ -22,7 +11,7 @@ MAX_INPUT_CHARS = 1_000_000
 
 
 def sanitize_player_entries(raw_players) -> List[dict]:
-    """Validates & normalizes a list of player dicts (from storage, import codes, or old config files)."""
+    """Valid, de-duplicated players. Accepts both the long and the compact (i/n/e) keys."""
     cleaned: List[dict] = []
     seen: Set[str] = set()
     if not isinstance(raw_players, list):
@@ -43,13 +32,7 @@ def sanitize_player_entries(raw_players) -> List[dict]:
 
 
 def merge_players(existing, imported) -> Tuple[List[dict], int, int]:
-    """Merges imported players into the existing list. Pure: neither input is changed.
-
-    Existing players come first and win on a duplicate Steam ID (their name and checkbox state are
-    kept). Both lists are sanitized, and the result holds at most MAX_PLAYERS players.
-    Returns ``(merged, added, skipped)``: ``added`` new players made it in, ``skipped`` new players
-    were dropped by the cap. Duplicates of existing players count as neither.
-    """
+    """Returns (merged, added, skipped). Existing players win on duplicates; `skipped` were cut by MAX_PLAYERS."""
     existing_clean = sanitize_player_entries(existing)
     existing_ids = {p["steam_id"] for p in existing_clean}
     new_entries = [p for p in sanitize_player_entries(imported) if p["steam_id"] not in existing_ids]
@@ -59,7 +42,6 @@ def merge_players(existing, imported) -> Tuple[List[dict], int, int]:
 
 
 def encode_squad_code(players: List[dict]) -> str:
-    """Encodes the player list (never the API key) into a short, copy-pasteable string."""
     compact = [
         {"i": p["steam_id"], "n": p.get("display_name", ""), "e": 1 if p.get("enabled", True) else 0}
         for p in sanitize_player_entries(players)
@@ -69,16 +51,10 @@ def encode_squad_code(players: List[dict]) -> str:
 
 
 def decode_squad_code(text: str) -> List[dict]:
-    """
-    Decodes a squad code OR raw JSON (e.g. the contents of the desktop config file steam_friends_game_finder_config.json).
-    Returns the sanitized player list. Any ``api_key`` in the input is ignored.
-    Raises ValueError on invalid input.
-    """
-    if text is not None and not isinstance(text, str):
-        raise ValueError("Squad code must be text.")
-    if text is not None and len(text) > MAX_INPUT_CHARS:
+    """Decodes a squad code or a config file's JSON into a player list. Raises ValueError."""
+    if len(text) > MAX_INPUT_CHARS:
         raise ValueError("The pasted text is too long to be a squad code or config JSON.")
-    text = (text or "").strip()
+    text = text.strip()
     if not text:
         raise ValueError("Nothing to import.")
     try:

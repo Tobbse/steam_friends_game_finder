@@ -1,3 +1,0 @@
--r requirements.txt
-flet[web]>=1.0,<2
-uvicorn[standard]>=0.30
