@@ -232,8 +232,11 @@ def create_button(
     style=None,
     visible: bool = True,
     disabled: bool = False,
+    **extra,
 ):
-    """Creates a Button with a hand cursor on hover (added to `style` unless it already sets one)."""
+    """Creates a Button with a hand cursor on hover (added to `style` unless it already sets one).
+    `extra` is passed to `ft.Button`, e.g. `**platform.link_props(url)` or `**platform.copy_props(text)`;
+    an `on_click` in those props binds to the `on_click` parameter."""
     if style is None:
         style = ft.ButtonStyle(mouse_cursor=ft.MouseCursor.CLICK)
     elif style.mouse_cursor is None:
@@ -246,6 +249,7 @@ def create_button(
         visible=visible,
         disabled=disabled,
         on_click=on_click,
+        **extra,
     )
 
 
@@ -256,8 +260,10 @@ def create_icon_button(
     icon_color: Optional[str] = None,
     icon_size: Optional[int] = None,
     compact: bool = False,
+    **extra,
 ):
-    """Creates an IconButton with a hand cursor on hover."""
+    """Creates an IconButton with a hand cursor on hover. `extra` is passed to `ft.IconButton`,
+    e.g. `**platform.link_props(url)`."""
     return ft.IconButton(
         icon=get_icon(icon_name),
         tooltip=tooltip or None,
@@ -268,6 +274,7 @@ def create_icon_button(
         padding=get_padding_symmetric(horizontal=2, vertical=2) if compact else None,
         mouse_cursor=ft.MouseCursor.CLICK,
         on_click=on_click,
+        **extra,
     )
 
 
@@ -281,9 +288,10 @@ def create_tooltip(message: str, wait_ms: int):
     return ft.Tooltip(message=message, wait_duration=wait_ms)
 
 
-def create_link_text(text: str, on_click: Callable, size: int, color: str = "white") -> ft.Text:
+def create_link_text(text: str, size: int, color: str = "white", **link_props) -> ft.Text:
     """Creates a single-line bold Text whose content is a clickable link (underlined on hover).
-    `on_click` receives the click event and is responsible for opening the link."""
+    `link_props` are passed to the `ft.TextSpan` and make it open the link: pass
+    `**platform.link_props(url)` (desktop gives an `on_click`, web a `url`)."""
     style = ft.TextStyle(color=get_color(color))
 
     def set_hover(hovered: bool):
@@ -296,9 +304,9 @@ def create_link_text(text: str, on_click: Callable, size: int, color: str = "whi
     span = ft.TextSpan(
         text,
         style=style,
-        on_click=on_click,
         on_enter=lambda _: set_hover(True),
         on_exit=lambda _: set_hover(False),
+        **link_props,
     )
 
     link_text = ft.Text(

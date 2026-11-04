@@ -7,7 +7,9 @@ import pytest
 from src.core.squad_code import (
     SQUAD_CODE_PREFIX,
     decode_squad_code,
+    MAX_PLAYERS,
     encode_squad_code,
+    merge_players,
     sanitize_player_entries,
 )
 
@@ -310,3 +312,52 @@ def test_sanitize_does_not_mutate_input():
     snapshot = json.loads(json.dumps(raw))
     sanitize_player_entries(raw)
     assert raw == snapshot
+
+
+# ---------- merge_players ----------
+
+def _p(i, name=None, enabled=True):
+    return {"steam_id": f"7656119{i:010d}", "display_name": name or f"P{i}", "enabled": enabled}
+
+
+def test_merge_adds_new_players_after_existing():
+    merged, added, skipped = merge_players([_p(1)], [_p(2), _p(3)])
+    assert [p["steam_id"] for p in merged] == [_p(1)["steam_id"], _p(2)["steam_id"], _p(3)["steam_id"]]
+    assert (added, skipped) == (2, 0)
+
+
+def test_merge_existing_player_wins_on_duplicate():
+    merged, added, skipped = merge_players([_p(1, "Mine", enabled=False)], [_p(1, "Theirs", enabled=True)])
+    assert merged == [_p(1, "Mine", enabled=False)]
+    assert (added, skipped) == (0, 0)
+
+
+def test_merge_sanitizes_result():
+    existing = [_p(1), {"steam_id": "123", "display_name": "bad"}]
+    imported = [{"steam_id": _p(2)["steam_id"], "display_name": "x" * 100}, "junk"]
+    merged, added, skipped = merge_players(existing, imported)
+    assert [p["steam_id"] for p in merged] == [_p(1)["steam_id"], _p(2)["steam_id"]]
+    assert merged[1]["display_name"] == "x" * 64
+    assert (added, skipped) == (1, 0)
+
+
+def test_merge_applies_cap_and_counts_skipped():
+    existing = [_p(i) for i in range(MAX_PLAYERS - 2)]
+    imported = [_p(i) for i in range(MAX_PLAYERS - 3, MAX_PLAYERS + 3)]  # 1 duplicate + 5 new
+    merged, added, skipped = merge_players(existing, imported)
+    assert len(merged) == MAX_PLAYERS
+    assert (added, skipped) == (2, 3)
+    assert merged[-1]["steam_id"] == _p(MAX_PLAYERS - 1)["steam_id"]
+
+
+def test_merge_into_full_list_adds_nothing():
+    existing = [_p(i) for i in range(MAX_PLAYERS)]
+    merged, added, skipped = merge_players(existing, [_p(MAX_PLAYERS + 1)])
+    assert len(merged) == MAX_PLAYERS
+    assert (added, skipped) == (0, 1)
+
+
+def test_merge_does_not_mutate_inputs():
+    existing, imported = [_p(1)], [_p(2)]
+    merge_players(existing, imported)
+    assert existing == [_p(1)] and imported == [_p(2)]

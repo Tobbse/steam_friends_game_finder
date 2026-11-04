@@ -26,6 +26,7 @@ from urllib.parse import quote, urlsplit
 import flet as ft
 
 from src.core.squad_code import sanitize_player_entries
+from src.platform.base import ConfigLoadError
 
 STORAGE_KEY = "steam_squad_finder.config.v1"  # Key inside the user's browser localStorage
 
@@ -75,6 +76,7 @@ class WebPlatform:
     """
 
     name = "web"
+    storage_description = "in this browser's local storage (not on the server)"
 
     def __init__(
         self,
@@ -114,6 +116,20 @@ class WebPlatform:
             return {}
         return {"url": ft.Url(url, target=ft.UrlTarget.BLANK)}
 
+    def copy_props(self, text: str, on_done: Optional[Callable[[bool], None]] = None) -> dict:
+        """Kwargs that make the client copy `text` inside the click itself (`ft.CopyToClipboard`).
+
+        iOS Safari ignores clipboard writes that arrive later from the server. The client runs the
+        action before it sends the click to Python, so `on_done` is called with True: the server
+        can't see whether the browser's copy worked. Must be called inside a Flet session, because
+        `ft.CopyToClipboard` binds to the current page's clipboard service."""
+        if not text:
+            return {}
+        props: dict = {"action": ft.CopyToClipboard(text)}
+        if on_done is not None:
+            props["on_click"] = lambda _e: on_done(True)
+        return props
+
     async def copy_to_clipboard(self, text: str) -> bool:
         try:
             await self._clipboard.set(text)
@@ -126,13 +142,16 @@ class WebPlatform:
 
         Call it only after the page is mounted (after `page.add`): browser storage is a client
         service and needs a connected page.
+
+        Raises `ConfigLoadError` if the storage read itself fails: returning defaults then would let
+        the next save overwrite a config that may still be there. Missing, corrupt or invalid data
+        returns the defaults.
         """
         config = {"api_key": "", "players": []}
         try:
             raw = await self._storage.get(STORAGE_KEY)
         except Exception as err:
-            print(f"Warning: Could not read browser storage: {err}")
-            return config
+            raise ConfigLoadError(f"Could not read browser storage: {err}") from err
         if not raw:
             return config
         try:

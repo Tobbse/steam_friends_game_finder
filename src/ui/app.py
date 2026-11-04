@@ -1,9 +1,10 @@
 import asyncio
 import math
-from typing import Dict, List, Optional, Set
+from typing import Awaitable, Callable, Dict, List, Optional, Set
 
 import flet as ft
 
+from src.core.export import format_game_titles
 from src.core.filtering import (
     MAX_PRICE_SLIDER_CAP,
     SORT_DEFAULT_DESCENDING,
@@ -13,6 +14,13 @@ from src.core.filtering import (
     sort_games,
 )
 from src.core.models import GameItem, Player
+from src.core.squad_code import (
+    MAX_PLAYERS,
+    decode_squad_code,
+    encode_squad_code,
+    merge_players,
+    sanitize_player_entries,
+)
 from src.core.steam_client import SteamClient
 from src.platform.base import Platform
 from src.ui.widgets import (
@@ -48,6 +56,34 @@ from src.ui.widgets import (
 )
 
 
+class LatestSnapshotWriter:
+    """Serializes config writes so the newest snapshot is always the one written last.
+
+    `save(snapshot)` records the snapshot as pending before its first await, then writes under a
+    lock. A call that gets the lock writes whatever is pending at that moment (the newest snapshot)
+    and clears it, so a call whose snapshot was already superseded and written writes nothing.
+    Platforms stay plain key-value stores; they don't need to handle overlapping writes.
+
+    If `write` raises, the exception propagates out of that `save` call and the lock is released,
+    so later saves still write. The failed snapshot is not retried; the next `save` writes its own
+    (newer) snapshot. `Platform.save_config` reports errors instead of raising, so in the app this
+    path only matters for unexpected errors.
+    """
+
+    def __init__(self, write: Callable[[dict], Awaitable[None]]):
+        self._write = write
+        self._lock = asyncio.Lock()
+        self._pending: Optional[dict] = None
+
+    async def save(self, snapshot: dict) -> None:
+        self._pending = snapshot
+        async with self._lock:
+            payload, self._pending = self._pending, None
+            if payload is None:
+                return
+            await self._write(payload)
+
+
 # ==========================================
 # MAIN FLET GUI APPLICATION
 # ==========================================
@@ -57,7 +93,7 @@ async def build_app(page: ft.Page, platform: Platform):
     page.padding = get_padding_symmetric(horizontal=20, vertical=8) or 20
     configure_always_visible_scrollbars(page)
 
-    # Default window dimensions: 1330 x 960
+    # Default window dimensions: 1330 x 960 (ignored when running in a browser)
     try:
         page.window.width = 1330
         page.window.height = 960
@@ -357,7 +393,7 @@ async def build_app(page: ft.Page, platform: Platform):
                     create_button(
                         "Steam Store",
                         icon="open_in_new",
-                        on_click=lambda _: platform.open_url(f"https://store.steampowered.com/app/{game.appid}/"),
+                        **platform.link_props(f"https://store.steampowered.com/app/{game.appid}/"),
                     ),
                     create_button("Close", on_click=lambda _: close_dialog(dlg)),
                 ],
@@ -369,7 +405,7 @@ async def build_app(page: ft.Page, platform: Platform):
             if needs_fallback_fetch:
                 async def fetch_background():
                     try:
-                        async with SteamClient(api_key_field.value.strip()) as client:
+                        async with SteamClient((api_key_field.value or "").strip()) as client:
                             await client.fetch_store_info(game)
 
                         desc_text.value = game.short_description or "No description available."
@@ -409,8 +445,13 @@ async def build_app(page: ft.Page, platform: Platform):
             print(f"Error displaying details: {err}")
             notify(f"Error displaying details: {err}")
 
-    # Load / Save Config
-    config = await platform.load_config()
+    # Load / Save Config. The saved config is loaded only after the page is mounted (see the end of
+    # build_app): browser storage on web needs a connected page. Until then the defaults apply.
+    config = {"api_key": "", "players": []}
+    # Set once the saved config is loaded. Until then nothing is written, so the defaults can never
+    # overwrite the user's saved config (the left panel is also disabled until then).
+    config_loaded = False
+    config_writer = LatestSnapshotWriter(platform.save_config)
 
     def sort_config_players():
         """Sorts players so enabled players are at the top, and alphabetically within each group."""
@@ -419,8 +460,13 @@ async def build_app(page: ft.Page, platform: Platform):
         )
 
     async def save_config():
+        if not config_loaded:
+            return
+        # Snapshot before the first await: later edits to `config` must not leak into this write,
+        # and a newer snapshot from an overlapping save must win.
         sort_config_players()
-        await platform.save_config(config)
+        snapshot = {**config, "players": [dict(p) for p in config.get("players", [])]}
+        await config_writer.save(snapshot)
 
     # App State & In-Memory Session Caches
     players: List[Player] = []
@@ -441,7 +487,14 @@ async def build_app(page: ft.Page, platform: Platform):
             color=get_color("orange400"),
             size=20,
         ),
-        tooltip="Warning: Your API key is stored on disk in plain text (steam_friends_game_finder_config.json).",
+        tooltip=(
+            f"Warning: Your API key is stored in plain text {platform.storage_description}."
+            + (
+                " It is sent to the app server only to make Steam requests. Don't use this on shared computers."
+                if platform.name == "web"
+                else ""
+            )
+        ),
         padding=get_padding_symmetric(horizontal=2, vertical=2),
     )
 
@@ -453,9 +506,11 @@ async def build_app(page: ft.Page, platform: Platform):
         spacing=6,
     )
 
+    # Always shown and always typed in by the user: there is no server-owned key.
+    # Filled from the saved config after the page is mounted.
     api_key_field = ft.TextField(
         label="Your API key",
-        value=config.get("api_key", ""),
+        value="",
         password=True,
         can_reveal_password=True,
         expand=True,
@@ -464,7 +519,7 @@ async def build_app(page: ft.Page, platform: Platform):
     api_key_help_btn = create_icon_button(
         "help_outline",
         tooltip="Get your Steam API Key from the official Steam website",
-        on_click=lambda _: platform.open_url("https://steamcommunity.com/dev/apikey"),
+        **platform.link_props("https://steamcommunity.com/dev/apikey"),
     )
 
     api_key_row = ft.Row([api_key_field, api_key_help_btn])
@@ -476,7 +531,13 @@ async def build_app(page: ft.Page, platform: Platform):
         "  2. Full Steam Profile URL (steamcommunity.com/id/... or /profiles/...)\n"
         "  3. Custom Vanity URL Name (e.g. gabelogannewell)\n"
         "• Privacy requirement: Each player's Steam Profile AND 'Game details' privacy setting must be set to Public.\n"
-        "• Storage: Your player list is saved locally on disk in steam_friends_game_finder_config.json."
+        f"• Storage: Your player list is saved {platform.storage_description}.\n"
+        "• Backup/share: Use 'Export Squad' / 'Import Squad' below the player list."
+        + (
+            " Discord may occasionally clear Activity storage, so keep a squad code handy."
+            if platform.name == "web"
+            else ""
+        )
     )
 
     add_player_info_icon = ft.Container(
@@ -912,13 +973,17 @@ async def build_app(page: ft.Page, platform: Platform):
         if is_fetching:
             return
 
-        api_key = api_key_field.value.strip()
+        api_key = (api_key_field.value or "").strip()
         if not api_key:
             show_dialog("API Key Required", "Please enter your Steam Web API Key before adding players.")
             return
 
-        val = new_player_input.value.strip()
+        val = (new_player_input.value or "").strip()
         if not val:
+            return
+
+        if len(config.get("players", [])) >= MAX_PLAYERS:
+            notify(f"Your player list is full ({MAX_PLAYERS} players). Delete a player first.")
             return
 
         config["api_key"] = api_key
@@ -974,6 +1039,113 @@ async def build_app(page: ft.Page, platform: Platform):
             filter_and_render_games(recompute_filters=True)
 
     new_player_input.on_submit = on_add_player
+
+    # ------------------------------------------
+    # SQUAD EXPORT / IMPORT (backup + share player lists; never includes the API key)
+    # ------------------------------------------
+    def open_export_dialog(e=None):
+        all_players = config.get("players", [])
+        if not all_players:
+            show_dialog("Nothing to Export", "Add at least one player first.")
+            return
+        code = encode_squad_code(all_players)
+        code_field = ft.TextField(value=code, read_only=True, multiline=True, min_lines=3, max_lines=6)
+
+        def on_copied(ok: bool):
+            notify("Squad code copied to clipboard!" if ok else "Copy failed - select the text and copy it manually.")
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Export Squad", weight=get_font_weight_bold()),
+            content=ft.Container(
+                width=460,
+                content=ft.Column(
+                    tight=True,
+                    spacing=10,
+                    controls=[
+                        ft.Text(
+                            f"This code contains your {len(all_players)} player(s) and their checkbox state. "
+                            "It does NOT contain your API key, so it's safe to share with friends.",
+                            size=12,
+                        ),
+                        code_field,
+                    ],
+                ),
+            ),
+            actions=[
+                create_button("Copy", icon="content_copy", **platform.copy_props(code, on_done=on_copied)),
+                create_button("Close", on_click=lambda _: close_dialog(dlg)),
+            ],
+            actions_alignment=get_main_alignment("end"),
+        )
+        open_dialog(dlg)
+
+    import_hint = (
+        "Paste a squad code (SSF1:...) or the contents of a config file "
+        "(steam_friends_game_finder_config.json or the older steam_finder_config.json)"
+        if platform.name == "desktop"
+        else "Paste a squad code (SSF1:...) or the contents of the desktop app's config file "
+        "(steam_friends_game_finder_config.json)"
+    )
+
+    def open_import_dialog(e=None):
+        input_field = ft.TextField(
+            hint_text=import_hint,
+            multiline=True,
+            min_lines=3,
+            max_lines=8,
+        )
+        error_text = ft.Text("", size=12, color=get_color("red300"))
+
+        def apply_import(_e=None):
+            # Only players are imported. decode_squad_code never returns an API key.
+            try:
+                imported = decode_squad_code(input_field.value or "")
+            except ValueError as err:
+                error_text.value = str(err)
+                page.update()
+                return
+
+            # Existing players win on a duplicate; the result is sanitized and capped at MAX_PLAYERS.
+            merged, added, skipped = merge_players(config.get("players", []), imported)
+            config["players"] = merged
+
+            platform.spawn(save_config)
+            close_dialog(dlg)
+            render_player_list()
+            filter_and_render_games(recompute_filters=True)
+            msg = f"Added {added} player(s)."
+            if skipped:
+                msg += f" {skipped} skipped: the list holds at most {MAX_PLAYERS} players."
+            notify(msg)
+
+        dlg = ft.AlertDialog(
+            title=ft.Text("Import Squad", weight=get_font_weight_bold()),
+            content=ft.Container(
+                width=460,
+                content=ft.Column(
+                    tight=True,
+                    spacing=10,
+                    controls=[
+                        ft.Text(
+                            "New players are added to your list; players already on it are kept as they are. "
+                            "API keys in the pasted text are ignored.",
+                            size=12,
+                        ),
+                        input_field,
+                        error_text,
+                    ],
+                ),
+            ),
+            actions=[
+                create_button("Merge", icon="call_merge", on_click=apply_import),
+                create_button("Cancel", on_click=lambda _: close_dialog(dlg)),
+            ],
+            actions_alignment=get_main_alignment("end"),
+        )
+        open_dialog(dlg)
+
+    export_squad_btn = create_button("Export Squad", icon="upload", on_click=open_export_dialog)
+    import_squad_btn = create_button("Import Squad", icon="download", on_click=open_import_dialog)
 
     add_player_btn = create_button("Add Player", icon="add", on_click=on_add_player)
     add_player_row = ft.Row([new_player_input, add_player_btn])
@@ -1062,6 +1234,54 @@ async def build_app(page: ft.Page, platform: Platform):
         except Exception:
             pass
     refresh_sort_menu()
+
+    # Copy Titles: copies the titles of all matching games (every page, current sort order), one per line.
+    # Web copies inside the click, so the text must already be on the button before the click:
+    # filter_and_render_games calls sync_copy_titles_button on every render to keep it current.
+    copy_titles_btn = create_icon_button(
+        "content_copy",
+        tooltip="Nothing to copy: no games loaded yet",
+        icon_size=16,
+        compact=True,
+        disabled=True,
+        bgcolor=get_color("bluegrey800"),
+        style=ft.ButtonStyle(
+            # Greyed-out icon while disabled; the button has no other disabled look
+            icon_color={ft.ControlState.DEFAULT: get_color("white"), ft.ControlState.DISABLED: get_color("grey600")},
+            shape=ft.RoundedRectangleBorder(radius=6),
+            side=ft.BorderSide(1, get_color("bluegrey600")),
+        ),
+    )
+    copy_titles_btn.width = copy_titles_btn.height = 30
+    copy_titles_text = ""  # the text the button's props currently copy
+
+    def sync_copy_titles_button(games: List[GameItem], disabled_reason: str = "no games match the current filters"):
+        """Points the copy button at `games`, or disables it with `disabled_reason` in the tooltip if empty.
+        The props are only rebuilt when the text changes, so paging doesn't resend the text to the client."""
+        nonlocal copy_titles_text
+        text = format_game_titles(games)
+        count = len(games)
+        copy_titles_btn.disabled = count == 0
+        if count == 0:
+            copy_titles_btn.tooltip = f"Nothing to copy: {disabled_reason}"
+        elif count == 1:
+            copy_titles_btn.tooltip = "Copy the title of the 1 matching game"
+        else:
+            copy_titles_btn.tooltip = f"Copy titles of all {count} matching games"
+        if text == copy_titles_text:
+            return
+        copy_titles_text = text
+
+        def on_copied(ok: bool):
+            if ok:
+                notify(f"Copied {count} game title{'' if count == 1 else 's'}.")
+            else:
+                notify("Copy failed - the clipboard couldn't be written.")
+
+        # copy_props returns {} for "" (no games), which clears both props
+        props = platform.copy_props(text, on_done=on_copied)
+        copy_titles_btn.on_click = props.get("on_click")
+        copy_titles_btn.action = props.get("action")
 
     list_mode_switch = create_switch(
         label="List Mode",
@@ -1247,7 +1467,7 @@ async def build_app(page: ft.Page, platform: Platform):
         if is_fetching:
             return
 
-        api_key = api_key_field.value.strip()
+        api_key = (api_key_field.value or "").strip()
         if not api_key:
             show_dialog("API Key Required", "Please enter your Steam Web API Key first.")
             return
@@ -1473,7 +1693,7 @@ async def build_app(page: ft.Page, platform: Platform):
                     ],
                     spacing=12,
                 ),
-                sort_menu_button,
+                ft.Row([copy_titles_btn, sort_menu_button], spacing=8),
             ],
         ),
     )
@@ -1556,6 +1776,7 @@ async def build_app(page: ft.Page, platform: Platform):
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
+            sync_copy_titles_button([], "wait until the games are loaded")
             show_games_placeholder(
                 build_centered_state(
                     icon_name="sync",
@@ -1576,6 +1797,7 @@ async def build_app(page: ft.Page, platform: Platform):
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
+            sync_copy_titles_button([], "no games loaded yet")
             show_games_placeholder(
                 build_centered_state(
                     icon_name="group_add",
@@ -1597,6 +1819,7 @@ async def build_app(page: ft.Page, platform: Platform):
             page_info_text.value = "Showing 0-0 (Page 0 of 0)"
             prev_page_btn.disabled = True
             next_page_btn.disabled = True
+            sync_copy_titles_button([], "no games loaded yet")
             show_games_placeholder(
                 build_centered_state(
                     icon_name="sports_esports",
@@ -1613,6 +1836,8 @@ async def build_app(page: ft.Page, platform: Platform):
 
         filtered_games = cached_filtered_games
         total_count = len(filtered_games)
+        # Copies all matching games (every page), so it's synced before the State 4 return
+        sync_copy_titles_button(filtered_games)
         total_players = len(players) or 1
 
         # Update persistent Filtered / Total count badge
@@ -1841,7 +2066,7 @@ async def build_app(page: ft.Page, platform: Platform):
                 icon_color="blue400",
                 icon_size=16 if is_small else None,
                 compact=is_small,
-                on_click=lambda _, url=store_url: platform.open_url(url),
+                **platform.link_props(store_url),
             )
 
             right_action_controls = []
@@ -1853,8 +2078,8 @@ async def build_app(page: ft.Page, platform: Platform):
             title_controls.append(
                 create_link_text(
                     game.name,
-                    on_click=lambda _, url=store_url: platform.open_url(url),
                     size=12 if is_small else 15,
+                    **platform.link_props(store_url),
                 )
             )
 
@@ -1954,6 +2179,12 @@ async def build_app(page: ft.Page, platform: Platform):
                     add_player_row,
                     ft.Divider(),
                     player_list_view,
+                    # Squad backup/share buttons sit above the bottom block, so its alignment is unchanged
+                    ft.Row(
+                        [export_squad_btn, import_squad_btn],
+                        alignment=get_main_alignment("center"),
+                        spacing=8,
+                    ),
                     # Divider + button area mirroring the right panel's bottom, measured from the window content edge:
                     # divider line at 4 card margin + 60 + 2 = 60 pagination bar + 4 spacing + 2, and the button
                     # centred at 4 card margin + 26 (60 minus 8 top padding, halved) = the bar's 30px centre line
@@ -1973,6 +2204,10 @@ async def build_app(page: ft.Page, platform: Platform):
             ),
         )
     )
+
+    # Disabled until the saved config is loaded, so the user can't change players or the key first
+    # (everything that edits the config lives in this panel). Enabled at the end of build_app.
+    left_panel.disabled = True
 
     # Top Row: "Filters" Container (Search Title & Search Tags side-by-side)
     filters_container = create_card(
@@ -2137,6 +2372,38 @@ async def build_app(page: ft.Page, platform: Platform):
         )
     )
 
-    # Initial Render of Player List & Counters
-    render_player_list()
-    filter_and_render_games(recompute_filters=True)
+    # Until the saved config is loaded, show "Loading" placeholders instead of rendering the empty defaults
+    player_list_view.controls = [
+        ft.Container(
+            padding=get_padding_symmetric(horizontal=4, vertical=4),
+            content=ft.Text("Loading saved players...", size=12, italic=True, color=get_color("grey500")),
+        )
+    ]
+    show_games_placeholder(
+        build_centered_state("hourglass_empty", "cyan400", "Loading saved settings...", show_spinner=True)
+    )
+    page.update()
+
+    # Load the saved API key & players now that the page is mounted (browser storage on web needs a
+    # connected page), then fill the API key field, render, and enable the left panel.
+    # One code path for both platforms.
+    try:
+        loaded = await platform.load_config()
+        config["api_key"] = str(loaded.get("api_key", "") or "")
+        config["players"] = sanitize_player_entries(loaded.get("players", []))
+        if config["api_key"] and not (api_key_field.value or "").strip():
+            api_key_field.value = config["api_key"]
+        config_loaded = True
+    except Exception as err:
+        # The saved config may still exist, so never save over it in this session (config_loaded
+        # stays False). The app stays usable with the defaults.
+        print(f"Warning: Could not load saved settings: {err}")
+        show_dialog(
+            "Settings not loaded",
+            "Your saved settings couldn't be read, so changes in this session won't be saved. "
+            "Use Export Squad to keep any players you add.",
+        )
+    finally:
+        left_panel.disabled = False
+        render_player_list()
+        filter_and_render_games(recompute_filters=True)

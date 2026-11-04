@@ -139,3 +139,46 @@ def test_link_props_empty_url(platform):
 @pytest.mark.parametrize("url", ["", None])
 def test_image_src_empty_returns_empty_string(platform, url):
     assert platform.image_src(url) == ""
+
+
+def test_storage_description_names_config_file(tmp_path):
+    assert DesktopPlatform(page=None).storage_description == "on disk in steam_friends_game_finder_config.json"
+    assert DesktopPlatform(page=None, config_path=tmp_path / "x.json").storage_description == "on disk in x.json"
+
+
+def test_copy_props_on_click_copies_then_calls_on_done(platform, monkeypatch):
+    copied, done = [], []
+
+    async def fake_copy(text):
+        copied.append(text)
+        return True
+
+    monkeypatch.setattr(platform, "copy_to_clipboard", fake_copy)
+    props = platform.copy_props("SSF1:abc", on_done=done.append)
+    assert set(props) == {"on_click"}
+    asyncio.run(props["on_click"](object()))  # Flet passes an event argument
+    assert copied == ["SSF1:abc"]
+    assert done == [True]
+
+
+def test_copy_props_reports_failure(platform, monkeypatch):
+    done = []
+
+    async def failing_copy(text):
+        return False
+
+    monkeypatch.setattr(platform, "copy_to_clipboard", failing_copy)
+    asyncio.run(platform.copy_props("x", on_done=done.append)["on_click"](object()))
+    assert done == [False]
+
+
+def test_copy_props_without_on_done(platform, monkeypatch):
+    async def fake_copy(text):
+        return True
+
+    monkeypatch.setattr(platform, "copy_to_clipboard", fake_copy)
+    asyncio.run(platform.copy_props("x")["on_click"](object()))  # must not raise
+
+
+def test_copy_props_empty_text(platform):
+    assert platform.copy_props("") == {}

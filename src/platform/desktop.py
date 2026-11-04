@@ -19,6 +19,10 @@ class DesktopPlatform:
         self.page = page
         self.config_path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
 
+    @property
+    def storage_description(self) -> str:
+        return f"on disk in {self.config_path.name}"
+
     def open_url(self, url: str) -> None:
         """Opens a URL in the user's default system web browser."""
         try:
@@ -31,6 +35,18 @@ class DesktopPlatform:
         if not url:
             return {}
         return {"on_click": lambda _e: self.open_url(url)}
+
+    def copy_props(self, text: str, on_done: Optional[Callable[[bool], None]] = None) -> dict:
+        """An async `on_click` handler that copies `text`, then calls `on_done(ok)`."""
+        if not text:
+            return {}
+
+        async def handler(_e):
+            ok = await self.copy_to_clipboard(text)
+            if on_done is not None:
+                on_done(ok)
+
+        return {"on_click": handler}
 
     async def copy_to_clipboard(self, text: str) -> bool:
         try:

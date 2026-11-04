@@ -4,7 +4,7 @@ import json
 import flet as ft
 import pytest
 
-from src.platform.base import Platform
+from src.platform.base import ConfigLoadError, Platform
 from src.platform.web import (
     STORAGE_KEY,
     WebPlatform,
@@ -344,9 +344,10 @@ def test_load_deeply_nested_json_returns_defaults():
     assert asyncio.run(platform.load_config()) == DEFAULTS
 
 
-def test_load_storage_error_returns_defaults(capsys):
-    assert asyncio.run(make(storage=FakeStorage(fail=True)).load_config()) == DEFAULTS
-    assert "Warning: Could not read browser storage" in capsys.readouterr().out
+def test_load_storage_read_error_raises_config_load_error():
+    # A failed read must not look like "nothing saved": the app would then overwrite the saved config.
+    with pytest.raises(ConfigLoadError, match="storage unavailable"):
+        asyncio.run(make(storage=FakeStorage(fail=True)).load_config())
 
 
 def test_load_validates_fields():
@@ -370,3 +371,52 @@ def test_load_players_not_a_list():
     raw = json.dumps({"api_key": 42, "players": "nope"})
     platform = make(storage=FakeStorage({STORAGE_KEY: raw}))
     assert asyncio.run(platform.load_config()) == {"api_key": "42", "players": []}
+
+
+# ---------- storage_description / copy_props ----------
+
+@pytest.fixture
+def flet_page_context():
+    """ft.CopyToClipboard binds to the current page's clipboard service, so it needs a page context."""
+    from flet.controls.context import _context_page
+
+    class _Services:
+        def register_service(self, service):
+            pass
+
+    page = FakePage()
+    page._services = _Services()  # Flet services register with the context page on construction
+    token = _context_page.set(page)
+    yield page
+    _context_page.reset(token)
+
+
+def test_storage_description_mentions_browser():
+    assert "browser" in make().storage_description
+    assert ".json" not in make().storage_description
+
+
+def test_copy_props_uses_client_side_copy_action(flet_page_context):
+    clipboard = FakeClipboard()
+    props = make(clipboard=clipboard).copy_props("SSF1:abc")
+    assert set(props) == {"action"}
+    assert isinstance(props["action"], ft.CopyToClipboard)
+    assert props["action"].data == "SSF1:abc"
+    # The copy happens on the client, never through the server-side clipboard service.
+    assert clipboard.value is None
+    # The props are accepted by the controls Task 4.5 uses.
+    ft.Button(content="Copy", **props)
+    ft.IconButton(icon=ft.Icons.CONTENT_COPY, **props)
+
+
+def test_copy_props_on_done_runs_on_click(flet_page_context):
+    done = []
+    props = make().copy_props("x", on_done=done.append)
+    assert set(props) == {"action", "on_click"}
+    props["on_click"](object())
+    assert done == [True]
+    ft.Button(content="Copy", **props)
+
+
+def test_copy_props_empty_text():
+    assert make().copy_props("") == {}

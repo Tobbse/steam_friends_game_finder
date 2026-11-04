@@ -14,7 +14,7 @@ import base64
 import json
 import re
 import zlib
-from typing import List, Set
+from typing import List, Set, Tuple
 
 SQUAD_CODE_PREFIX = "SSF1:"
 MAX_PLAYERS = 500
@@ -40,6 +40,22 @@ def sanitize_player_entries(raw_players) -> List[dict]:
         cleaned.append({"steam_id": sid, "display_name": name, "enabled": bool(enabled_raw)})
         seen.add(sid)
     return cleaned
+
+
+def merge_players(existing, imported) -> Tuple[List[dict], int, int]:
+    """Merges imported players into the existing list. Pure: neither input is changed.
+
+    Existing players come first and win on a duplicate Steam ID (their name and checkbox state are
+    kept). Both lists are sanitized, and the result holds at most MAX_PLAYERS players.
+    Returns ``(merged, added, skipped)``: ``added`` new players made it in, ``skipped`` new players
+    were dropped by the cap. Duplicates of existing players count as neither.
+    """
+    existing_clean = sanitize_player_entries(existing)
+    existing_ids = {p["steam_id"] for p in existing_clean}
+    new_entries = [p for p in sanitize_player_entries(imported) if p["steam_id"] not in existing_ids]
+    merged = sanitize_player_entries(existing_clean + new_entries)
+    added = len(merged) - len(existing_clean)
+    return merged, added, len(new_entries) - added
 
 
 def encode_squad_code(players: List[dict]) -> str:
