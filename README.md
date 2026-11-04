@@ -44,6 +44,15 @@ Then open http://localhost:8181. Set `PORT` to use a different port.
 
 The server stores nothing. Each user enters their own API key, which stays in their browser's local storage together with the player list.
 
+## First launch of the prebuilt app
+
+The app is not signed, so the OS warns you on first launch:
+
+- **macOS:** System Settings → Privacy & Security → "Open Anyway"
+- **Windows:** "More info" → "Run anyway"
+
+The first start can take 10–20 seconds.
+
 ## Tests
 
 ```bash
