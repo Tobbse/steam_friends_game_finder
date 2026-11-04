@@ -1,5 +1,4 @@
 import asyncio
-import datetime
 import json
 import re
 import time
@@ -10,7 +9,7 @@ import httpx
 from src.core.models import GameItem, Player
 from src.core.pricing import (
     detect_unreleased_from_store_item,
-    is_release_text_unreleased,
+    has_unreleased_keyword,
     parse_price_string,
 )
 
@@ -23,10 +22,10 @@ SESSION_TAG_MAP: Dict[int, str] = {}
 # ASYNC STEAM API CLIENT (BULK & RATE-SAFE)
 # ==========================================
 class SteamClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, transport: Optional[httpx.AsyncBaseTransport] = None):
         self.api_key = api_key
         limits = httpx.Limits(max_connections=20, max_keepalive_connections=15)
-        self.client = httpx.AsyncClient(timeout=15.0, limits=limits)
+        self.client = httpx.AsyncClient(timeout=15.0, limits=limits, transport=transport)
         self._api_semaphore = asyncio.Semaphore(6)    # Official Web API concurrency
         self._store_semaphore = asyncio.Semaphore(2)  # Gentle throttle for store.steampowered.com
 
@@ -228,7 +227,6 @@ class SteamClient:
         chunk_size = 150
         chunks = [games[i : i + chunk_size] for i in range(0, total, chunk_size)]
         now_ts = time.time()
-        current_year = datetime.datetime.now(datetime.timezone.utc).year
 
         async def process_chunk(chunk: List[GameItem]):
             nonlocal completed
@@ -322,7 +320,7 @@ class SteamClient:
 
                             # Extract Release Status & Unreleased Detection
                             coming_soon, rel_date_str = detect_unreleased_from_store_item(
-                                item, now_ts, current_year
+                                item, now_ts
                             )
                             g.is_unreleased = coming_soon
                             if rel_date_str and not g.release_date:
@@ -424,7 +422,6 @@ class SteamClient:
         if game.details_fetched or (game.store_info_fetched and game.short_description):
             return
 
-        current_year = datetime.datetime.now(datetime.timezone.utc).year
         async with self._store_semaphore:
             url = f"https://store.steampowered.com/api/appdetails?appids={game.appid}&cc=us"
             try:
@@ -446,9 +443,7 @@ class SteamClient:
                     rel_info = game_data.get("release_date") or {}
                     if rel_info.get("date"):
                         game.release_date = str(rel_info["date"]).strip()
-                    if rel_info.get("coming_soon") is True or is_release_text_unreleased(
-                        game.release_date, current_year
-                    ):
+                    if rel_info.get("coming_soon") is True or has_unreleased_keyword(game.release_date):
                         game.is_unreleased = True
                         game.is_unavailable = False
 

@@ -11,6 +11,14 @@ class Platform(Protocol):
         """Opens `url` in a browser on the user's device."""
         ...
 
+    def link_props(self, url: str) -> dict:
+        """All kwargs a clickable control (`TextSpan`, `IconButton`, `Button`, `Container`, ...) needs to
+        open `url`, e.g. `ft.IconButton(..., **platform.link_props(url))`. Call sites must not set
+        `on_click` themselves. Desktop returns `{"on_click": handler}` (the handler takes the event and
+        calls `open_url`); web returns `{"url": ft.Url(url, target=BLANK)}` and no `on_click`, so the
+        client opens the link and it can't open twice. An empty `url` returns {}."""
+        ...
+
     async def copy_to_clipboard(self, text: str) -> bool:
         """Copies `text` to the user's clipboard. Returns True on success."""
         ...
@@ -23,12 +31,9 @@ class Platform(Protocol):
         """Persists the config. Errors are reported, not raised."""
         ...
 
-    def image_src(self, url: str) -> str:
-        """Maps a remote image URL to the src the UI should use (desktop returns it unchanged)."""
-        ...
-
-    def server_api_key(self) -> Optional[str]:
-        """A Steam API key provided by the host, if any (desktop returns None)."""
+    def image_src(self, url: Optional[str]) -> str:
+        """Maps a remote image URL to the src the UI should use (desktop returns it unchanged).
+        Never returns None: an empty or None `url` gives ""."""
         ...
 
     def spawn(self, coro_fn: Callable[..., Awaitable], *args) -> None:

@@ -26,6 +26,12 @@ class DesktopPlatform:
         except Exception:
             pass
 
+    def link_props(self, url: str) -> dict:
+        """An `on_click` handler that opens `url` in the system browser."""
+        if not url:
+            return {}
+        return {"on_click": lambda _e: self.open_url(url)}
+
     async def copy_to_clipboard(self, text: str) -> bool:
         try:
             await ft.Clipboard().set(text)
@@ -57,11 +63,8 @@ class DesktopPlatform:
         except OSError as err:
             print(f"Warning: Could not save config file: {err}")
 
-    def image_src(self, url: str) -> str:
-        return url
-
-    def server_api_key(self) -> Optional[str]:
-        return None
+    def image_src(self, url: Optional[str]) -> str:
+        return url or ""
 
     def spawn(self, coro_fn: Callable[..., Awaitable], *args) -> None:
         self.page.run_task(coro_fn, *args)

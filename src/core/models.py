@@ -1,7 +1,6 @@
-import datetime
 from typing import Dict, List, Optional, Set
 
-from src.core.pricing import is_release_text_unreleased
+from src.core.pricing import has_unreleased_keyword
 
 
 # ==========================================
@@ -49,16 +48,10 @@ class GameItem:
     def is_effectively_unreleased(self) -> bool:
         """
         Authoritative check for whether this game is unreleased.
-        Checks explicit `is_unreleased` flag as well as release_date text and price_str.
+        True if Steam flagged it (`is_unreleased`) or if release_date / price_str contains an
+        unreleased keyword ("Coming soon", "TBA", ...). Dates and years in the text are not parsed.
         """
-        if self.is_unreleased:
-            return True
-        current_year = datetime.datetime.now(datetime.timezone.utc).year
-        if self.release_date and is_release_text_unreleased(self.release_date, current_year):
-            return True
-        if self.price_str and is_release_text_unreleased(self.price_str, current_year):
-            return True
-        return False
+        return self.is_unreleased or has_unreleased_keyword(self.release_date) or has_unreleased_keyword(self.price_str)
 
     @property
     def is_effectively_unavailable(self) -> bool:

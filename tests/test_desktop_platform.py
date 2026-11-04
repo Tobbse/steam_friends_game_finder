@@ -93,10 +93,9 @@ def test_save_error_is_reported_not_raised(tmp_path, capsys):
     assert "Warning: Could not save config file" in capsys.readouterr().out
 
 
-def test_image_src_and_server_key(platform):
+def test_name_and_image_src(platform):
     assert platform.name == "desktop"
     assert platform.image_src("https://example.com/a.jpg") == "https://example.com/a.jpg"
-    assert platform.server_api_key() is None
 
 
 def test_desktop_platform_satisfies_protocol(platform):
@@ -122,3 +121,21 @@ def test_open_url_calls_webbrowser_open(platform, monkeypatch):
     monkeypatch.setattr("src.platform.desktop.webbrowser.open", lambda url: opened.append(url))
     platform.open_url("https://example.com/")
     assert opened == ["https://example.com/"]
+
+
+def test_link_props_on_click_opens_url(platform, monkeypatch):
+    opened = []
+    monkeypatch.setattr("src.platform.desktop.webbrowser.open", lambda url: opened.append(url))
+    props = platform.link_props("https://example.com/")
+    assert set(props) == {"on_click"}
+    props["on_click"](object())  # Flet passes an event argument
+    assert opened == ["https://example.com/"]
+
+
+def test_link_props_empty_url(platform):
+    assert platform.link_props("") == {}
+
+
+@pytest.mark.parametrize("url", ["", None])
+def test_image_src_empty_returns_empty_string(platform, url):
+    assert platform.image_src(url) == ""

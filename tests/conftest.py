@@ -1,6 +1,21 @@
+import httpx
 import pytest
 
 from src.core.models import GameItem, Player
+
+
+@pytest.fixture(autouse=True)
+def _block_real_network(monkeypatch):
+    """Safety net: any request that reaches httpx's real transports fails the test."""
+
+    def _blocked(self, request, *args, **kwargs):
+        pytest.fail(f"Real network request attempted: {request.method} {request.url}")
+
+    async def _blocked_async(self, request, *args, **kwargs):
+        pytest.fail(f"Real network request attempted: {request.method} {request.url}")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _blocked)
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _blocked_async)
 
 
 @pytest.fixture
